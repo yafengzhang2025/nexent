@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Globe,
@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scrollArea";
-import { Button } from "antd";
+import { Button, message as antdMessage } from "antd";
 import { MarkdownRenderer, CodeBlock } from "@/components/ui/markdownRenderer";
 import { chatConfig } from "@/const/chatConfig";
 import {
@@ -27,14 +27,81 @@ import {
   extractObjectNameFromUrl,
 } from "@/services/storageService";
 import log from "@/lib/logger";
+import { useConfig } from "@/hooks/useConfig";
+
+/**
+ * Convert custom code tags to standard markdown code fences
+ * This should be called BEFORE passing content to MarkdownRenderer
+ * Handles streaming cases where closing tags may not be present yet
+ * - <code>...</code> → ```python ... ```
+ * - <code>... (incomplete) → ```python (open code fence, no content yet)
+ * - <DISPLAY:language>...</DISPLAY> → ```language ... ```
+ * - <DISPLAY:language>... (incomplete) → ```language (open code fence, no content yet)
+ */
+const convertToMarkdownCodeFences = (content: string): string => {
+  // Step 1: Handle complete <DISPLAY:language>...</DISPLAY> blocks
+  content = content.replace(/<DISPLAY:(\w+)>([\s\S]*?)<\/DISPLAY>/g, (_match, language, code) => {
+    return `\`\`\`${language}\n${code.trim()}\n\`\`\``;
+  });
+
+  // Step 2: Handle complete <code>...</code> blocks
+  content = content.replace(/<code>([\s\S]*?)<\/code>/g, (_match, code) => {
+    return `\`\`\`python\n${code.trim()}\n\`\`\``;
+  });
+
+  // Step 3: Handle incomplete tags during streaming
+  // <DISPLAY:language> without closing </DISPLAY> → ```language\n (open fence)
+  // Only match if there's no closing tag later in the content
+  content = content.replace(/<DISPLAY:(\w+)>(?![\s\S]*<\/DISPLAY>)/g, (_match, language) => {
+    return `\`\`\`${language}\n`;
+  });
+
+  // <code> without closing </code> → ```python\n (open fence)
+  // Only match if there's no closing tag later in the content
+  content = content.replace(/<code>(?![\s\S]*<\/code>)/g, () => {
+    return `\`\`\`python\n`;
+  });
+
+  return content;
+};
 
 /**
  * Extract code content and language from model_output_code content
- * Handles both <RUN> and <DISPLAY:language> formats
+ * Handles both <code> and legacy <RUN> / <DISPLAY:language> formats
  * Supports streaming mode where end markers may not be present yet
  * @param content - Raw code content from stream
  * @returns Object with codeContent and language
  */
+/**
+ * Strip trailing backticks and newlines from code content.
+ * Used during streaming when closing markers may not be fully received.
+ */
+const stripTrailingMarkers = (content: string): string => {
+  while (content.endsWith("```") || content.endsWith("\n")) {
+    if (content.endsWith("```")) {
+      content = content.substring(0, content.length - 3);
+    } else {
+      content = content.substring(0, content.length - 1);
+    }
+  }
+  return content;
+};
+
+/**
+ * Remove incomplete end markers that may appear during streaming.
+ */
+const stripIncompleteEndMarkers = (content: string): string => {
+  const endIdx = content.indexOf("```<END");
+  if (endIdx !== -1) {
+    content = content.substring(0, endIdx);
+  }
+  const endTagIdx = content.indexOf("<END");
+  if (endTagIdx !== -1) {
+    content = content.substring(0, endTagIdx);
+  }
+  return content;
+};
+
 const extractCodeInfo = (
   content: string
 ): { codeContent: string; language: string } => {
@@ -44,107 +111,157 @@ const extractCodeInfo = (
 
   let processed = content;
 
-  // Remove "代码：" or "Code:" prefix if present (handle both full-width and half-width colon)
-  processed = processed.replace(/^(代码|Code)[：:]\s*/i, "");
-
-  // 1. Detect and process COMPLETE <DISPLAY:language> format
-  // Match: ```<DISPLAY:python> or ``` <DISPLAY:python>
-  const displayMatch = processed.match(/```\s*<DISPLAY:(\w+)>/);
-  if (displayMatch) {
-    const language = displayMatch[1];
-    // Remove the opening marker (handle optional whitespace and newline)
-    processed = processed.replace(/```\s*<DISPLAY:\w+>\s*\n?/, "");
-    // Remove closing marker if present: ```<END_DISPLAY_CODE> or just <END_DISPLAY_CODE>
-    processed = processed.replace(/\n?```<END_DISPLAY_CODE>[\s\S]*$/, "");
-    processed = processed.replace(/<END_DISPLAY_CODE>[\s\S]*$/, "");
-    // Remove trailing "[已展示给用户]" or similar text
-    processed = processed.replace(/\[已展示给用户\][\s\S]*$/, "");
-    // Clean up any remaining incomplete markers (for streaming)
-    processed = processed.replace(/\n?```<END[\s\S]*$/, "");
-    processed = processed.replace(/<END[\s\S]*$/, "");
-    // Remove trailing backticks that might be part of incomplete end marker
-    processed = processed.replace(/\n?```$/, "");
-    return { codeContent: processed.trim(), language };
+  // Remove "代码：" or "Code:" prefix if present
+  if (processed.startsWith("代码：") || processed.startsWith("代码:")) {
+    processed = processed.substring(4);
+  } else if (processed.toLowerCase().startsWith("code：") || processed.toLowerCase().startsWith("code:")) {
+    processed = processed.substring(4);
   }
 
-  // 2. Detect and process COMPLETE <RUN> format (executable code, default to python)
-  const runMatch = processed.match(/```\s*<RUN>/);
-  if (runMatch) {
-    // Remove the opening marker
-    processed = processed.replace(/```\s*<RUN>\s*\n?/, "");
-    // Remove closing marker if present
-    processed = processed.replace(/\n?```<END_CODE>[\s\S]*$/, "");
-    processed = processed.replace(/<END_CODE>[\s\S]*$/, "");
-    // Clean up any remaining incomplete markers (for streaming)
-    processed = processed.replace(/\n?```<END[\s\S]*$/, "");
-    processed = processed.replace(/<END[\s\S]*$/, "");
-    // Remove trailing backticks
-    processed = processed.replace(/\n?```$/, "");
+  // 1. NEW <code>...</code> format (executable, default python)
+  const codeStart = processed.indexOf("<code>");
+  if (codeStart !== -1) {
+    const contentStart = codeStart + "<code>".length;
+    const codeEnd = processed.indexOf("</code>", contentStart);
+    processed = codeEnd !== -1
+      ? processed.substring(contentStart, codeEnd)
+      : processed.substring(contentStart);
+    processed = stripIncompleteEndMarkers(processed);
+    processed = stripTrailingMarkers(processed);
     return { codeContent: processed.trim(), language: "python" };
   }
 
-  // 3. Handle PARTIAL/INCOMPLETE headers (Streaming)
-  // This is critical for preventing the user from seeing raw tags like "```<DISPLAY:py"
-
-  // Case: ```<DISPLAY:py... (Incomplete tag, no closing >)
-  // Or: ```<RUN (Incomplete tag)
-  // Or: ```< (Just started special tag)
-  if (/^```\s*<[A-Z]*(:[a-z0-9]*)?$/.test(processed)) {
-    // We are strictly inside the header tag. Content is empty.
-    // Try to guess language if possible
-    const langMatch = processed.match(/:(\w+)$/);
-    return { codeContent: "", language: langMatch ? langMatch[1] : "python" };
-  }
-
-  // If content contains incomplete markers somewhere else (not at start), try to detect them
-  // This handles cases where backticks might have been stripped or came separately
-  if (processed.includes("<DISPLAY:") || processed.includes("<RUN>")) {
-    const partialDisplayMatch = processed.match(/<DISPLAY:(\w+)>/);
-    if (partialDisplayMatch) {
-      const language = partialDisplayMatch[1];
-      // Remove all variations of the display marker
-      processed = processed.replace(/```\s*<DISPLAY:\w+>\s*\n?/g, "");
-      processed = processed.replace(/<DISPLAY:\w+>\s*\n?/g, "");
-      // Clean up end markers
-      processed = processed.replace(/\n?```<END[\s\S]*$/, "");
-      processed = processed.replace(/<END[\s\S]*$/, "");
-      processed = processed.replace(/\n?```$/, "");
+  // 2. NEW <DISPLAY:language>...</DISPLAY> format (display only)
+  const displayStart = processed.indexOf("<DISPLAY:");
+  if (displayStart !== -1) {
+    const langEnd = processed.indexOf(">", displayStart);
+    if (langEnd !== -1) {
+      const language = processed.substring(displayStart + "<DISPLAY:".length, langEnd);
+      const contentStart = langEnd + 1;
+      const displayEnd = processed.indexOf("</DISPLAY>", contentStart);
+      processed = displayEnd !== -1
+        ? processed.substring(contentStart, displayEnd)
+        : processed.substring(contentStart);
+      processed = stripIncompleteEndMarkers(processed);
+      processed = stripTrailingMarkers(processed);
+      const displayUserIdx = processed.indexOf("[已展示给用户]");
+      if (displayUserIdx !== -1) {
+        processed = processed.substring(0, displayUserIdx);
+      }
       return { codeContent: processed.trim(), language };
     }
+  }
 
-    if (processed.includes("<RUN>")) {
-      // Remove all variations of the RUN marker
-      processed = processed.replace(/```\s*<RUN>\s*\n?/g, "");
-      processed = processed.replace(/<RUN>\s*\n?/g, "");
-      // Clean up end markers
-      processed = processed.replace(/\n?```<END[\s\S]*$/, "");
-      processed = processed.replace(/<END[\s\S]*$/, "");
-      processed = processed.replace(/\n?```$/, "");
-      return { codeContent: processed.trim(), language: "python" };
+  // 3. LEGACY ```<DISPLAY:language> format with backticks
+  const legacyDisplayStart = processed.indexOf("```<DISPLAY:");
+  if (legacyDisplayStart !== -1) {
+    const langEnd = processed.indexOf(">", legacyDisplayStart + "```<DISPLAY:".length);
+    if (langEnd !== -1) {
+      const language = processed.substring(legacyDisplayStart + "```<DISPLAY:".length, langEnd);
+      const contentStart = langEnd + 1;
+      const endCodeIdx = processed.indexOf("```<END_DISPLAY_CODE>", contentStart);
+      const endCodeIdx2 = processed.indexOf("<END_DISPLAY_CODE>", contentStart);
+      const endPos = endCodeIdx !== -1 ? endCodeIdx : endCodeIdx2;
+      processed = endPos !== -1
+        ? processed.substring(contentStart, endPos)
+        : processed.substring(contentStart);
+      processed = stripIncompleteEndMarkers(processed);
+      processed = stripTrailingMarkers(processed);
+      const displayUserIdx = processed.indexOf("[已展示给用户]");
+      if (displayUserIdx !== -1) {
+        processed = processed.substring(0, displayUserIdx);
+      }
+      return { codeContent: processed.trim(), language };
     }
   }
 
-  // 4. Handle standard markdown block start or ambiguous start
-  // Case: Just ``` or ```\n
-  // Hide the backticks until we know what's coming, to avoid flashing raw markdown
-  if (/^```\s*$/.test(processed)) {
+  // 4. LEGACY ```<RUN> format (executable, default python)
+  const runStart = processed.indexOf("```<RUN>");
+  if (runStart !== -1) {
+    const contentStart = runStart + "```<RUN>".length;
+    const endCodeIdx = processed.indexOf("```<END_CODE>", contentStart);
+    const endCodeIdx2 = processed.indexOf("<END_CODE>", contentStart);
+    const endPos = endCodeIdx !== -1 ? endCodeIdx : endCodeIdx2;
+    processed = endPos !== -1
+      ? processed.substring(contentStart, endPos)
+      : processed.substring(contentStart);
+    processed = stripIncompleteEndMarkers(processed);
+    processed = stripTrailingMarkers(processed);
+    return { codeContent: processed.trim(), language: "python" };
+  }
+
+  // 5. Handle PARTIAL/INCOMPLETE headers (Streaming)
+  // Prevent raw incomplete tags from being shown to users
+
+  if (processed === "<code") {
     return { codeContent: "", language: "python" };
   }
 
-  // 5. Fallback: Treat as standard markdown code block
-  if (processed.startsWith("```")) {
-    // Check for standard language tag: ```python
-    const standardMatch = processed.match(/^```(\w+)\s/);
-    let lang = "python";
-    if (standardMatch) {
-      lang = standardMatch[1];
-      processed = processed.replace(/^```\w+\s*/, "");
-    } else {
-      processed = processed.replace(/^```\s*/, "");
-    }
+  const incompleteDisplayRun = /^<(DISPLAY:[a-z0-9]*|RUN)$/i.test(processed);
+  if (incompleteDisplayRun) {
+    const colonIdx = processed.lastIndexOf(":");
+    return {
+      codeContent: "",
+      language: colonIdx !== -1 ? (processed.substring(colonIdx + 1) || "python") : "python",
+    };
+  }
 
-    // Clean tails
-    processed = processed.replace(/\n?```$/, "");
+  const incompleteWithBackticks = /^```\s*<[A-Z]*(:[a-z0-9]*)?$/.test(processed);
+  if (incompleteWithBackticks) {
+    const colonIdx = processed.lastIndexOf(":");
+    const lang = colonIdx !== -1 ? processed.substring(colonIdx + 1).replace(/[`\s<>]/g, "") : "";
+    return { codeContent: "", language: lang || "python" };
+  }
+
+  // 6. Inline DISPLAY/RUN detection (handles case where backticks may have been stripped)
+  const inlineDisplayIdx = processed.indexOf("<DISPLAY:");
+  if (inlineDisplayIdx !== -1) {
+    const langEnd = processed.indexOf(">", inlineDisplayIdx);
+    if (langEnd !== -1) {
+      const language = processed.substring(inlineDisplayIdx + "<DISPLAY:".length, langEnd);
+      const contentStart = langEnd + 1;
+      processed = processed.substring(contentStart);
+      processed = stripIncompleteEndMarkers(processed);
+      processed = stripTrailingMarkers(processed);
+      return { codeContent: processed.trim(), language };
+    }
+  }
+
+  const inlineRunIdx = processed.indexOf("<RUN>");
+  if (inlineRunIdx !== -1) {
+    const contentStart = inlineRunIdx + "<RUN>".length;
+    processed = processed.substring(contentStart);
+    processed = stripIncompleteEndMarkers(processed);
+    processed = stripTrailingMarkers(processed);
+    return { codeContent: processed.trim(), language: "python" };
+  }
+
+  // 7. Handle standard markdown block start
+  const stripped = processed.replace(/^```\s*/, "");
+  if (stripped !== processed && stripped.length === 0) {
+    return { codeContent: "", language: "python" };
+  }
+
+  // 8. Fallback: standard markdown code block
+  if (processed.startsWith("```")) {
+    let lang = "python";
+    let contentStart = processed.charAt(3) === "\n" ? 4 : 3;
+    if (processed.charAt(3) !== "\n") {
+      const spaceIdx = processed.indexOf(" ");
+      const newlineIdx = processed.indexOf("\n");
+      if (spaceIdx !== -1 && (newlineIdx === -1 || spaceIdx < newlineIdx)) {
+        lang = processed.substring(3, spaceIdx);
+        contentStart = spaceIdx + 1;
+      } else if (newlineIdx !== -1) {
+        lang = processed.substring(3, newlineIdx);
+        contentStart = newlineIdx + 1;
+      }
+    }
+    processed = processed.substring(contentStart);
+    const closingIdx = processed.lastIndexOf("```");
+    if (closingIdx !== -1) {
+      processed = processed.substring(0, closingIdx);
+    }
     return { codeContent: processed.trim(), language: lang };
   }
 
@@ -248,7 +365,7 @@ const messageHandlers: MessageHandler[] = [
   {
     canHandle: (message) =>
       message.type === chatConfig.messageTypes.SEARCH_CONTENT_PLACEHOLDER,
-    render: (message, t) => {
+    render: (message, t, context) => {
       // Find search results in the message context
       const messageContainer = message._messageContainer;
       if (
@@ -377,12 +494,16 @@ const messageHandlers: MessageHandler[] = [
       ): Promise<void> => {
         try {
           if (site.sourceType === "datamate") {
+            if (!context?.appConfig?.modelEngineEnabled) {
+              antdMessage.error("DataMate download not available: ModelEngine is not enabled");
+              return;
+            }
             if (
               !site.datamateDatasetId &&
               !site.datamateFileId &&
               (!site.url || site.url === "#")
             ) {
-              message.error(
+              antdMessage.error(
                 t(
                   "taskWindow.downloadError",
                   "Missing Datamate dataset or file information"
@@ -418,7 +539,7 @@ const messageHandlers: MessageHandler[] = [
               setTimeout(() => {
                 document.body.removeChild(link);
               }, 100);
-              message.success(
+              antdMessage.success(
                 t("taskWindow.downloadSuccess", "File download started")
               );
               return;
@@ -434,7 +555,7 @@ const messageHandlers: MessageHandler[] = [
                 : `attachments/${site.filename}`;
             }
             if (!objectName) {
-              message.error(
+              antdMessage.error(
                 t(
                   "taskWindow.downloadError",
                   "Failed to download file. Please try again."
@@ -448,12 +569,12 @@ const messageHandlers: MessageHandler[] = [
             );
           }
 
-          message.success(
+          antdMessage.success(
             t("taskWindow.downloadSuccess", "File download started")
           );
         } catch (error) {
           log.error("Failed to download knowledge file:", error);
-          message.error(
+          antdMessage.error(
             t(
               "taskWindow.downloadError",
               "Failed to download file. Please try again."
@@ -951,7 +1072,7 @@ const messageHandlers: MessageHandler[] = [
         }}
       >
         <MarkdownRenderer
-          content={message.content}
+          content={convertToMarkdownCodeFences(message.content)}
           className="task-message-content"
           showDiagramToggle={false}
           enableMultimodal={false}
@@ -1074,7 +1195,7 @@ const messageHandlers: MessageHandler[] = [
       if (typeof content === "string") {
         return (
           <MarkdownRenderer
-            content={content}
+            content={convertToMarkdownCodeFences(content)}
             className="task-message-content"
             showDiagramToggle={false}
             enableMultimodal={false}
@@ -1100,13 +1221,15 @@ const messageHandlers: MessageHandler[] = [
 interface TaskWindowProps {
   messages: TaskMessageType[];
   isStreaming?: boolean;
+  defaultExpanded?: boolean;
 }
 
-export function TaskWindow({ messages, isStreaming = false }: TaskWindowProps) {
+function TaskWindowInner({ messages, isStreaming = false, defaultExpanded = true }: TaskWindowProps) {
   const { t } = useTranslation("common");
+  const { appConfig } = useConfig();
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
-  const [isExpanded, setIsExpanded] = useState(true); // default expand task details interface
+  const [isExpanded, setIsExpanded] = useState(defaultExpanded); // default expand task details interface
   const [contentHeight, setContentHeight] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -1139,6 +1262,20 @@ export function TaskWindow({ messages, isStreaming = false }: TaskWindowProps) {
       setContentHeight(height);
     }
   }, [isExpanded, groupedMessages, messages]);
+
+  // Force recalculate content height after mount for cached error messages
+  useEffect(() => {
+    if (isExpanded && contentHeight === 0) {
+      // Delay to ensure DOM is rendered
+      const timer = setTimeout(() => {
+        if (contentRef.current) {
+          const height = contentRef.current.scrollHeight;
+          setContentHeight(height);
+        }
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [isExpanded, contentHeight]);
 
   // Dynamic threshold calculation based on content growth
   const calculateDynamicThreshold = (baseThreshold: number) => {
@@ -1272,7 +1409,7 @@ export function TaskWindow({ messages, isStreaming = false }: TaskWindowProps) {
 
     const handler = messageHandlers.find((h) => h.canHandle(message));
     if (handler) {
-      return handler.render(message, t);
+      return handler.render(message, t, { appConfig });
     }
 
     // Fallback processing, normally not executed here
@@ -1454,119 +1591,21 @@ export function TaskWindow({ messages, isStreaming = false }: TaskWindowProps) {
           </div>
         )}
       </div>
-
-      {/* Add necessary CSS animations */}
-      <style jsx global>{`
-        @keyframes blinkingDot {
-          0% {
-            background-color: rgba(59, 130, 246, 0.5);
-          }
-          50% {
-            background-color: rgba(79, 70, 229, 1);
-          }
-          100% {
-            background-color: rgba(59, 130, 246, 0.5);
-          }
-        }
-        .blinkingDot {
-          animation: blinkingDot 1.5s infinite ease-in-out;
-          background-color: rgba(79, 70, 229, 1);
-          box-shadow: 0 0 5px rgba(79, 70, 229, 0.5);
-        }
-
-        /* For the code block style in task-message-content */
-        /* Allow code-block-container to use its default styles */
-        .task-message-content .code-block-container {
-          max-width: 100% !important;
-          margin: 8px 0 !important;
-        }
-
-        .task-message-content .code-block-content pre {
-          white-space: pre-wrap !important;
-          word-wrap: break-word !important;
-          word-break: break-word !important;
-          overflow-wrap: break-word !important;
-          max-width: 100% !important;
-          box-sizing: border-box !important;
-        }
-
-        /* For inline code and fallback code */
-        .task-message-content code:not(.code-block-content code) {
-          white-space: pre-wrap !important;
-          word-wrap: break-word !important;
-          word-break: break-word !important;
-          overflow-wrap: break-word !important;
-          max-width: 100% !important;
-        }
-
-        /* Ensure the content of the SyntaxHighlighter component wraps correctly */
-        .task-message-content .react-syntax-highlighter-line-number {
-          white-space: nowrap !important;
-        }
-
-        /* Make sure the entire container is not stretched by the content */
-        .task-message-content {
-          max-width: 100% !important;
-          word-wrap: break-word !important;
-          word-break: break-word !important;
-        }
-
-        /* Allow code block container to overflow if needed for proper display */
-        .task-message-content .code-block-container {
-          overflow: visible !important;
-        }
-
-        .task-message-content * {
-          max-width: 100% !important;
-          box-sizing: border-box !important;
-        }
-
-        /* Exception for code block container - allow it to use its default overflow */
-        .task-message-content .code-block-container * {
-          max-width: none !important;
-        }
-
-        /* Override diagram size in task window */
-        .task-message-content .my-4 {
-          max-width: 200px !important;
-          margin: 0 auto !important;
-          display: flex !important;
-          justify-content: center !important;
-        }
-
-        .task-message-content .my-4 img {
-          max-width: 200px !important;
-          width: 200px !important;
-          margin: 0 auto !important;
-          display: block !important;
-        }
-
-        /* More specific selectors for mermaid diagrams */
-        .task-message-content .task-message-content .my-4 {
-          max-width: 200px !important;
-          margin: 0 auto !important;
-          display: flex !important;
-          justify-content: center !important;
-        }
-
-        .task-message-content .task-message-content .my-4 img {
-          max-width: 200px !important;
-          width: 200px !important;
-          margin: 0 auto !important;
-          display: block !important;
-        }
-
-        /* Paragraph spacing adjustment */
-        .task-message-content p {
-          margin-bottom: 0.5rem !important;
-          margin-top: 0.25rem !important;
-        }
-
-        .task-message-content .markdown-body p {
-          margin-bottom: 0.5rem !important;
-          margin-top: 0.25rem !important;
-        }
-      `}</style>
     </>
   );
 }
+
+function areEqualTaskWindow(prev: TaskWindowProps, next: TaskWindowProps): boolean {
+  if (prev.isStreaming !== next.isStreaming) return false;
+  if (prev.messages.length !== next.messages.length) return false;
+  // During streaming the last message grows in content without the array length changing.
+  if (prev.messages.length > 0) {
+    const prevLast = prev.messages[prev.messages.length - 1];
+    const nextLast = next.messages[next.messages.length - 1];
+    if (prevLast.id !== nextLast.id || prevLast.content !== nextLast.content) return false;
+  }
+  // defaultExpanded is only meaningful on initial mount; exclude from equality check.
+  return true;
+}
+
+export const TaskWindow = React.memo(TaskWindowInner, areEqualTaskWindow);

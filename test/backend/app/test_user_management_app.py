@@ -98,7 +98,7 @@ class TestUserSignup:
 
     def test_signup_success_regular_user(self):
         """Test successful regular user registration"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.return_value = {"user_id": "123", "email": "test@example.com"}
 
             response = client.post(
@@ -106,25 +106,50 @@ class TestUserSignup:
                 json={
                     "email": "test@example.com",
                     "password": "password123",
-                    "is_admin": False,
                     "invite_code": None
                 }
             )
 
             assert response.status_code == HTTPStatus.OK
             data = response.json()
-            assert "User account registered successfully" in data["message"]
+            assert "registered successfully" in data["message"]
             assert "data" in data
             mock_signup.assert_called_once_with(
                 email="test@example.com",
                 password="password123",
-                is_admin=False,
-                invite_code=None
+                invite_code=None,
+                auto_login=True
+            )
+
+    def test_signup_success_regular_user_with_auto_login_false(self):
+        """Test successful regular user registration with auto_login=false"""
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
+            mock_signup.return_value = {"user_id": "123", "email": "test@example.com"}
+
+            response = client.post(
+                "/user/signup",
+                json={
+                    "email": "test@example.com",
+                    "password": "password123",
+                    "invite_code": None,
+                    "auto_login": False
+                }
+            )
+
+            assert response.status_code == HTTPStatus.OK
+            data = response.json()
+            assert "registered successfully" in data["message"]
+            assert "data" in data
+            mock_signup.assert_called_once_with(
+                email="test@example.com",
+                password="password123",
+                invite_code=None,
+                auto_login=False
             )
 
     def test_signup_success_admin_user(self):
         """Test successful admin user registration"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.return_value = {"user_id": "123", "email": "admin@example.com"}
 
             response = client.post(
@@ -132,25 +157,49 @@ class TestUserSignup:
                 json={
                     "email": "admin@example.com",
                     "password": "password123",
-                    "is_admin": True,
                     "invite_code": "admin_code"
                 }
             )
 
             assert response.status_code == HTTPStatus.OK
             data = response.json()
-            assert "Admin account registered successfully" in data["message"]
+            assert "🎉 User account registered successfully! Please start experiencing the AI assistant service." in data["message"]
             assert "data" in data
             mock_signup.assert_called_once_with(
                 email="admin@example.com",
                 password="password123",
-                is_admin=True,
-                invite_code="admin_code"
+                invite_code="admin_code",
+                auto_login=True
+            )
+
+    def test_signup_success_admin_user_with_auto_login_false(self):
+        """Test successful admin user registration with auto_login=false (tenant management scenario)"""
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
+            mock_signup.return_value = {"user_id": "123", "email": "admin@example.com"}
+
+            response = client.post(
+                "/user/signup",
+                json={
+                    "email": "admin@example.com",
+                    "password": "password123",
+                    "invite_code": "admin_code",
+                    "auto_login": False
+                }
+            )
+
+            assert response.status_code == HTTPStatus.OK
+            data = response.json()
+            assert "registered successfully" in data["message"]
+            mock_signup.assert_called_once_with(
+                email="admin@example.com",
+                password="password123",
+                invite_code="admin_code",
+                auto_login=False
             )
 
     def test_signup_no_invite_code_exception(self):
         """Test registration fails due to missing invite code"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = NoInviteCodeException("No invite code configured")
 
             response = client.post(
@@ -158,7 +207,6 @@ class TestUserSignup:
                 json={
                     "email": "admin@example.com",
                     "password": "password123",
-                    "is_admin": True,
                     "invite_code": None
                 }
             )
@@ -169,7 +217,7 @@ class TestUserSignup:
 
     def test_signup_incorrect_invite_code_exception(self):
         """Test registration fails due to incorrect invite code"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = IncorrectInviteCodeException("Invalid invite code")
 
             response = client.post(
@@ -177,7 +225,6 @@ class TestUserSignup:
                 json={
                     "email": "admin@example.com",
                     "password": "password123",
-                    "is_admin": True,
                     "invite_code": "wrong_code"
                 }
             )
@@ -188,7 +235,7 @@ class TestUserSignup:
 
     def test_signup_registration_service_exception(self):
         """Test registration fails due to service error"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = UserRegistrationException("Service error")
 
             response = client.post(
@@ -196,7 +243,6 @@ class TestUserSignup:
                 json={
                     "email": "test@example.com",
                     "password": "password123",
-                    "is_admin": False,
                     "invite_code": None
                 }
             )
@@ -207,7 +253,7 @@ class TestUserSignup:
 
     def test_signup_email_already_exists(self):
         """Test registration fails due to email already existing"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = AuthApiError("Email already exists", 400, "email_exists")
 
             response = client.post(
@@ -215,7 +261,6 @@ class TestUserSignup:
                 json={
                     "email": "existing@example.com",
                     "password": "password123",
-                    "is_admin": False,
                     "invite_code": None
                 }
             )
@@ -226,7 +271,7 @@ class TestUserSignup:
 
     def test_signup_weak_password(self):
         """Test registration fails due to weak password"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = AuthWeakPasswordError("Password too weak", 400, ["Password is too weak"])
 
             response = client.post(
@@ -234,7 +279,6 @@ class TestUserSignup:
                 json={
                     "email": "test@example.com",
                     "password": "weakpass",
-                    "is_admin": False,
                     "invite_code": None
                 }
             )
@@ -245,7 +289,7 @@ class TestUserSignup:
 
     def test_signup_unknown_error(self):
         """Test registration fails due to unknown error"""
-        with patch('apps.user_management_app.signup_user') as mock_signup:
+        with patch('apps.user_management_app.signup_user_with_invitation') as mock_signup:
             mock_signup.side_effect = Exception("Unknown error")
 
             response = client.post(
@@ -253,7 +297,6 @@ class TestUserSignup:
                 json={
                     "email": "test@example.com",
                     "password": "password123",
-                    "is_admin": False,
                     "invite_code": None
                 }
             )
@@ -528,39 +571,33 @@ class TestGetCurrentUserId:
         mock_validate.assert_called_once_with("Bearer token")
 
     @patch('apps.user_management_app.validate_token')
-    @patch('apps.user_management_app.get_current_user_id')
-    def test_get_user_id_success_parsed_from_token(self, mock_get_user_id, mock_validate):
-        """Test successful user ID retrieval by parsing token"""
+    def test_get_user_id_token_validation_failed_returns_401(self, mock_validate):
+        """Test that when token validation fails, return 401 (no fallback to parse token)"""
         mock_validate.return_value = (False, None)
-        mock_get_user_id.return_value = ("user123", "tenant456")
 
         response = client.get(
             "/user/current_user_id",
             headers={"Authorization": "Bearer expired_token"}
         )
 
-        assert response.status_code == HTTPStatus.OK
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
         data = response.json()
-        assert data["message"] == "Successfully parsed user ID from token"
-        assert data["data"]["user_id"] == "user123"
+        assert "User not logged in or session invalid" in data["detail"]
         mock_validate.assert_called_once_with("Bearer expired_token")
-        mock_get_user_id.assert_called_once_with("Bearer expired_token")
 
     @patch('apps.user_management_app.validate_token')
-    @patch('apps.user_management_app.get_current_user_id')
-    def test_get_user_id_invalid_session(self, mock_get_user_id, mock_validate):
-        """Test user ID retrieval with invalid session"""
+    def test_get_user_id_invalid_session(self, mock_validate):
+        """Test user ID retrieval with invalid session returns 401"""
         mock_validate.return_value = (False, None)
-        mock_get_user_id.return_value = (None, None)
 
         response = client.get(
             "/user/current_user_id",
             headers={"Authorization": "Bearer invalid_token"}
         )
 
-        assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
         data = response.json()
-        assert data["detail"] == "User not logged in or session invalid"
+        assert "User not logged in or session invalid" in data["detail"]
 
     def test_get_user_id_no_authorization(self):
         """Test user ID retrieval without authorization header"""
@@ -751,7 +788,7 @@ class TestRevokeUserAccount:
 class TestIntegration:
     """Integration tests for user management flow"""
 
-    @patch('apps.user_management_app.signup_user')
+    @patch('apps.user_management_app.signup_user_with_invitation')
     @patch('apps.user_management_app.signin_user')
     @patch('apps.user_management_app.get_session_by_authorization')
     @patch('apps.user_management_app.get_authorized_client')
@@ -764,7 +801,6 @@ class TestIntegration:
             json={
                 "email": "test@example.com",
                 "password": "password123",
-                "is_admin": False,
                 "invite_code": None
             }
         )
@@ -832,11 +868,210 @@ class TestDataValidation:
             json={
                 "email": "invalid-email",
                 "password": "password123",
-                "is_admin": False,
                 "invite_code": None
             }
         )
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+class TestCreateTokenEndpoint:
+    """Tests for POST /tokens endpoint."""
+
+    @patch('apps.user_management_app.create_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_create_token_success(self, mock_get_user_id, mock_create_token):
+        """Test successful token creation."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_create_token.return_value = {
+            "token_id": 1,
+            "access_key": "nexent-abc123",
+            "user_id": "user-123"
+        }
+
+        response = client.post(
+            "/user/tokens",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()
+        assert data["message"] == "success"
+        assert data["data"]["token_id"] == 1
+
+    @patch('apps.user_management_app.create_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_create_token_no_authorization(self, mock_get_user_id, mock_create_token):
+        """Test token creation without authorization header."""
+        response = client.post("/user/tokens")
+
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
+        data = response.json()
+        assert "No authorization header" in data["detail"]
+
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_create_token_missing_user_id(self, mock_get_user_id):
+        """Test token creation when user_id is missing from JWT."""
+        mock_get_user_id.return_value = (None, None)
+
+        response = client.post(
+            "/user/tokens",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
+        data = response.json()
+        assert "missing user_id" in data["detail"]
+
+    @patch('apps.user_management_app.create_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_create_token_exception(self, mock_get_user_id, mock_create_token):
+        """Test token creation with exception."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_create_token.side_effect = Exception("Database error")
+
+        response = client.post(
+            "/user/tokens",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class TestListTokensEndpoint:
+    """Tests for GET /tokens endpoint."""
+
+    @patch('apps.user_management_app.list_tokens_by_user')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_list_tokens_success(self, mock_get_user_id, mock_list_tokens):
+        """Test successful token listing."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_list_tokens.return_value = [
+            {"token_id": 1, "access_key": "nexent-key1", "user_id": "user-123"},
+            {"token_id": 2, "access_key": "nexent-key2", "user_id": "user-123"}
+        ]
+
+        response = client.get(
+            "/user/tokens?user_id=user-123",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()
+        assert data["message"] == "success"
+        assert len(data["data"]) == 2
+
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_list_tokens_no_authorization(self, mock_get_user_id):
+        """Test token listing without authorization header."""
+        response = client.get("/user/tokens?user_id=user-123")
+
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
+        data = response.json()
+        assert "No authorization header" in data["detail"]
+
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_list_tokens_forbidden_other_user(self, mock_get_user_id):
+        """Test listing tokens for a different user is forbidden."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+
+        response = client.get(
+            "/user/tokens?user_id=user-other",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.FORBIDDEN
+        data = response.json()
+        assert "cannot list tokens for other users" in data["detail"]
+
+    @patch('apps.user_management_app.list_tokens_by_user')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_list_tokens_empty(self, mock_get_user_id, mock_list_tokens):
+        """Test listing tokens when user has none."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_list_tokens.return_value = []
+
+        response = client.get(
+            "/user/tokens?user_id=user-123",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()
+        assert data["data"] == []
+
+    @patch('apps.user_management_app.list_tokens_by_user')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_list_tokens_exception(self, mock_get_user_id, mock_list_tokens):
+        """Test token listing with exception."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_list_tokens.side_effect = Exception("Database error")
+
+        response = client.get(
+            "/user/tokens?user_id=user-123",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class TestDeleteTokenEndpoint:
+    """Tests for DELETE /tokens/{token_id} endpoint."""
+
+    @patch('apps.user_management_app.delete_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_delete_token_success(self, mock_get_user_id, mock_delete_token):
+        """Test successful token deletion."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_delete_token.return_value = True
+
+        response = client.delete(
+            "/user/tokens/1",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()
+        assert data["message"] == "success"
+        assert data["data"]["token_id"] == 1
+
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_delete_token_no_authorization(self, mock_get_user_id):
+        """Test token deletion without authorization header."""
+        response = client.delete("/user/tokens/1")
+
+        assert response.status_code == HTTPStatus.UNAUTHORIZED
+        data = response.json()
+        assert "No authorization header" in data["detail"]
+
+    @patch('apps.user_management_app.delete_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_delete_token_not_found(self, mock_get_user_id, mock_delete_token):
+        """Test deleting non-existent token."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_delete_token.return_value = False
+
+        response = client.delete(
+            "/user/tokens/999",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.NOT_FOUND
+        data = response.json()
+        assert "not found" in data["detail"]
+
+    @patch('apps.user_management_app.delete_token')
+    @patch('apps.user_management_app.get_current_user_id')
+    def test_delete_token_exception(self, mock_get_user_id, mock_delete_token):
+        """Test token deletion with exception."""
+        mock_get_user_id.return_value = ("user-123", "tenant-456")
+        mock_delete_token.side_effect = Exception("Database error")
+
+        response = client.delete(
+            "/user/tokens/1",
+            headers={"Authorization": "Bearer test-jwt-token"}
+        )
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 if __name__ == "__main__":

@@ -103,6 +103,16 @@ export interface ChatAttachmentProps {
   className?: string;
 }
 
+// File preview drawer props
+export interface FilePreviewProps {
+  open: boolean;
+  objectName: string;
+  fileName: string;
+  fileType?: string;
+  fileSize?: number;
+  onClose: () => void;
+}
+
 // Main chat message type
 export interface ChatMessageType {
   id: string
@@ -178,12 +188,18 @@ export interface CardItem {
   [key: string]: any; // Allow other properties
 }
 
+// Context passed from the component to module-level message handlers
+export interface MessageHandlerContext {
+  appConfig?: import("@/types/modelConfig").AppConfig;
+}
+
 // Message handler interface for task window extensibility
 export interface MessageHandler {
   canHandle: (message: any) => boolean;
   render: (
     message: any,
-    t: (key: string, options?: any) => string
+    t: (key: string, options?: any) => string,
+    context?: MessageHandlerContext
   ) => React.ReactNode;
 }
 
@@ -254,27 +270,6 @@ export interface SettingsMenuItem {
   key: string;
   label: string;
   onClick: () => void;
-}
-
-// Chat sidebar props type
-export interface ChatSidebarProps {
-  conversationList: ConversationListItem[];
-  selectedConversationId: number | null;
-  openDropdownId: string | null;
-  streamingConversations: Set<number>;
-  completedConversations: Set<number>;
-  onNewConversation: () => void;
-  onDialogClick: (dialog: ConversationListItem) => void;
-  onRename: (dialogId: number, title: string) => void;
-  onDelete: (dialogId: number) => void;
-  onSettingsClick: () => void;
-  settingsMenuItems?: SettingsMenuItem[];
-  onDropdownOpenChange: (open: boolean, id: string | null) => void;
-  onToggleSidebar: () => void;
-  expanded: boolean;
-  userEmail: string | undefined;
-  userAvatarUrl: string | undefined;
-  userRole: string | undefined;
 }
 
 // Image item type for chat right panel

@@ -26,6 +26,14 @@ sys.modules['consts.const'] = consts_mock.const
 boto3_mock = MagicMock()
 sys.modules['boto3'] = boto3_mock
 
+# Mock minio module
+minio_mock = MagicMock()
+minio_commonconfig_mock = MagicMock()
+minio_commonconfig_mock.CopySource = MagicMock()
+minio_mock.commonconfig = minio_commonconfig_mock
+sys.modules['minio'] = minio_mock
+sys.modules['minio.commonconfig'] = minio_commonconfig_mock
+
 # Mock nexent.storage modules
 nexent_mock = MagicMock()
 nexent_storage_mock = MagicMock()
@@ -58,9 +66,13 @@ with patch('backend.database.attachment_db.minio_client', minio_client_mock):
         download_file,
         get_file_url,
         get_file_size_from_minio,
+        file_exists,
+        copy_file,
         list_files,
         delete_file,
         get_file_stream,
+        get_file_stream_raw,
+        get_file_range,
         get_content_type
     )
 
@@ -484,4 +496,142 @@ class TestGetContentType:
         assert get_content_type('test.JPG') == 'image/jpeg'
         assert get_content_type('test.PNG') == 'image/png'
         assert get_content_type('test.PDF') == 'application/pdf'
+
+
+class TestFileExists:
+    """Test cases for file_exists function"""
+
+    def test_file_exists_returns_true_when_file_exists(self):
+        """Test file_exists returns True when file exists in bucket"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.file_exists.return_value = True
+            
+            result = file_exists('test/file.txt')
+            
+            assert result is True
+            mock_client.file_exists.assert_called_once_with('test/file.txt', None)
+
+    def test_file_exists_returns_false_when_file_not_exists(self):
+        """Test file_exists returns False when file does not exist"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.file_exists.return_value = False
+            
+            result = file_exists('nonexistent/file.txt')
+            
+            assert result is False
+            mock_client.file_exists.assert_called_once_with('nonexistent/file.txt', None)
+
+    def test_file_exists_with_custom_bucket(self):
+        """Test file_exists with custom bucket parameter"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.file_exists.return_value = True
+            
+            result = file_exists('test/file.txt', bucket='custom-bucket')
+            
+            assert result is True
+            mock_client.file_exists.assert_called_once_with('test/file.txt', 'custom-bucket')
+
+    def test_file_exists_handles_any_exception(self):
+        """Test file_exists handles any exception and returns False"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.file_exists.side_effect = RuntimeError('Connection failed')
+            
+            result = file_exists('test/file.txt')
+            
+            assert result is False
+            mock_client.file_exists.assert_called_once_with('test/file.txt', None)
+
+
+class TestCopyFile:
+    """Test cases for copy_file function"""
+
+    def test_copy_file_success(self):
+        """Test successful file copy"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.copy_file.return_value = (True, 'dest/file.pdf')
+            
+            result = copy_file('source/file.pdf', 'dest/file.pdf')
+            
+            assert result['success'] is True
+            assert result['object_name'] == 'dest/file.pdf'
+            mock_client.copy_file.assert_called_once_with('source/file.pdf', 'dest/file.pdf', None)
+
+    def test_copy_file_with_custom_bucket(self):
+        """Test copy_file with custom bucket"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.copy_file.return_value = (True, 'dest/file.pdf')
+            
+            result = copy_file('source/file.pdf', 'dest/file.pdf', bucket='custom-bucket')
+            
+            assert result['success'] is True
+            mock_client.copy_file.assert_called_once_with('source/file.pdf', 'dest/file.pdf', 'custom-bucket')
+
+    def test_copy_file_failure(self):
+        """Test copy_file handles errors"""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.copy_file.return_value = (False, 'Copy failed')
+            
+            result = copy_file('source/file.pdf', 'dest/file.pdf')
+            
+            assert result['success'] is False
+            assert 'Copy failed' in result['error']
+
+
+class TestGetFileRange:
+    """Unit tests for get_file_range function."""
+
+    def test_range_calls_client_get_file_range(self):
+        """When start and end are provided, calls client.get_file_range."""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_body = MagicMock()
+            mock_client.get_file_range.return_value = (True, mock_body)
+
+            result = get_file_range('attachments/doc.pdf', start=0, end=1023)
+
+            assert result is mock_body
+            mock_client.get_file_range.assert_called_once_with('attachments/doc.pdf', 0, 1023, None)
+
+    def test_range_with_custom_bucket(self):
+        """Passes bucket parameter through to the underlying client call."""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_body = MagicMock()
+            mock_client.get_file_range.return_value = (True, mock_body)
+
+            result = get_file_range('attachments/doc.pdf', start=512, end=1023, bucket='my-bucket')
+
+            assert result is mock_body
+            mock_client.get_file_range.assert_called_once_with('attachments/doc.pdf', 512, 1023, 'my-bucket')
+
+    def test_range_returns_none_on_client_failure(self):
+        """Returns None when client returns success=False for a range request."""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.get_file_range.return_value = (False, 'NoSuchKey')
+
+            result = get_file_range('missing/doc.pdf', start=0, end=100)
+
+            assert result is None
+
+
+class TestGetFileStreamRaw:
+    """Unit tests for get_file_stream_raw function."""
+
+    def test_returns_raw_stream_on_success(self):
+        """Returns the underlying raw stream object on success."""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_body = MagicMock()
+            mock_client.get_file_stream.return_value = (True, mock_body)
+
+            result = get_file_stream_raw('attachments/doc.pdf')
+
+            assert result is mock_body
+            mock_client.get_file_stream.assert_called_once_with('attachments/doc.pdf', None)
+
+    def test_returns_none_on_failure(self):
+        """Returns None when client returns success=False."""
+        with patch('backend.database.attachment_db.minio_client') as mock_client:
+            mock_client.get_file_stream.return_value = (False, 'error')
+
+            result = get_file_stream_raw('missing/doc.pdf')
+
+            assert result is None
 

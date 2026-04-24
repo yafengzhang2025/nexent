@@ -8,9 +8,11 @@ import React, {
 import { useTranslation } from "react-i18next";
 
 import { Input, Button, App, Select } from "antd";
+const { TextArea } = Input;
 import { InfoCircleFilled } from "@ant-design/icons";
 import { BookText, Pilcrow, PencilRuler, Eye, Glasses, CircleOff } from "lucide-react";
 import { MarkdownRenderer } from "@/components/ui/markdownRenderer";
+import { FilePreviewDrawer } from "@/components/ui/filePreviewDrawer";
 
 import {
   UI_CONFIG,
@@ -22,6 +24,7 @@ import {
 import knowledgeBaseService from "@/services/knowledgeBaseService";
 import { modelService } from "@/services/modelService";
 import { getTenantDefaultGroupId } from "@/services/groupService";
+import { extractObjectNameFromUrl } from "@/services/storageService";
 import { Document } from "@/types/knowledgeBase";
 import { ModelOption } from "@/types/modelConfig";
 import { formatFileSize } from "@/lib/utils";
@@ -32,9 +35,9 @@ import { useGroupList } from "@/hooks/group/useGroupList";
 import DocumentStatus from "./DocumentStatus";
 import DocumentChunk from "./DocumentChunk";
 import UploadArea from "../upload/UploadArea";
-import { useKnowledgeBaseContext } from "../../contexts/KnowledgeBaseContext";
 import { useDocumentContext } from "../../contexts/DocumentContext";
 import { useAuthorizationContext } from "@/components/providers/AuthorizationProvider";
+import { Can } from "@/components/permission/Can";
 
 const CONTAINER_HEIGHT_CLASS_MAP: Record<string, string> = {
   "83vh": "h-[83vh]",
@@ -72,6 +75,11 @@ interface DocumentListProps {
   onIngroupPermissionChange?: (value: string) => void;
   selectedGroupIds?: number[];
   onSelectedGroupIdsChange?: (values: number[]) => void;
+  // Embedding model for create mode
+  availableEmbeddingModels?: ModelOption[];
+  selectedEmbeddingModel?: string;
+  onEmbeddingModelChange?: (value: string) => void;
+  permission?: string; // User's permission for this knowledge base (READ_ONLY, EDIT, etc.)
 
   // Upload related props
   isDragging?: boolean;
@@ -110,6 +118,11 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
       onIngroupPermissionChange,
       selectedGroupIds,
       onSelectedGroupIdsChange,
+      // Embedding model for create mode
+      availableEmbeddingModels,
+      selectedEmbeddingModel,
+      onEmbeddingModelChange,
+      permission,
 
       // Upload related props
       isDragging = false,
@@ -130,7 +143,7 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
     const tenantId = user?.tenantId || null;
 
     // Fetch groups for group selection
-    const { data: groupData } = useGroupList(tenantId, 1, 100);
+    const { data: groupData } = useGroupList(tenantId);
     const groups = groupData?.groups || [];
 
     // Create group name mapping
@@ -138,6 +151,14 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
       label: group.group_name,
       value: group.group_id,
     }));
+
+    // Preview drawer state
+    const [selectedFile, setSelectedFile] = useState<{
+      objectName: string;
+      fileName: string;
+      fileType?: string;
+      fileSize?: number;
+    } | null>(null);
 
     // Use fixed height instead of percentage
     const titleBarHeight = UI_CONFIG.TITLE_BAR_HEIGHT;
@@ -207,12 +228,16 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
     const [showChunk, setShowChunk] = React.useState(false);
     const [summary, setSummary] = useState("");
     const [isSummarizing, setIsSummarizing] = useState(false);
+    const [isEditing, setIsEditing] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [selectedModel, setSelectedModel] = useState<number>(0);
     const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
     const [isLoadingModels, setIsLoadingModels] = useState(false);
     const { t } = useTranslation();
     const isDataMate = (knowledgeBaseSource || "").toLowerCase() === "datamate";
+
+    // Determine if user has read-only permission
+    const isReadOnlyMode = permission === "READ_ONLY";
 
     // Permission options with icons shown inside dropdown
     const permissionOptions = [
@@ -269,6 +294,16 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
       }
     }, [isCreatingMode, tenantId]);
 
+    // Clear group IDs when permission is set to PRIVATE
+    React.useEffect(() => {
+      if (ingroupPermission === "PRIVATE" && onSelectedGroupIdsChange) {
+        onSelectedGroupIdsChange([]);
+      }
+    }, [ingroupPermission, onSelectedGroupIdsChange]);
+
+    // Check if group select should be disabled (when permission is PRIVATE)
+    const isGroupSelectDisabled = ingroupPermission === "PRIVATE";
+
     // Load available models when showing detail
     useEffect(() => {
       const loadModels = async () => {
@@ -276,7 +311,7 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
           setIsLoadingModels(true);
           try {
             const models = await modelService.getLLMModels();
-            setAvailableModels(models);
+            setAvailableModels(models.filter(m => m.connect_status === "available"));
 
             // Determine initial selection order:
             // 1) Knowledge base's own configured model (server-side config)
@@ -461,25 +496,44 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
                   />
                   {/* Right-aligned container for dropdowns */}
                   <div className="flex items-center ml-auto justify-end" style={{ gap: "12px", justifyContent: "flex-end", alignItems: "flex-end", width: "100%" }}>
-                    {/* User groups multi-select - first position */}
-                    <Select
-                      mode="multiple"
-                      value={selectedGroupIds}
-                      onChange={onSelectedGroupIdsChange}
-                      style={{ minWidth: 200, justifyContent: "center", alignItems: "flex-end" }}
-                      placeholder={t("knowledgeBase.create.permission.groupPlaceholder")}
-                      options={groupOptions}
-                      maxTagCount={2}
-                      allowClear
-                    />
-                    {/* Group permission dropdown - second position */}
-                    <Select
-                      value={ingroupPermission}
-                      onChange={onIngroupPermissionChange}
-                      style={{ width: 160, justifyContent: "center", alignItems: "flex-end" }}
-                      placeholder={t("knowledgeBase.ingroup.permission.DEFAULT")}
-                      options={permissionOptions}
-                    />
+                    {/* Embedding model selection - first position in create mode */}
+                    {isCreatingMode && onEmbeddingModelChange && (
+                      <Select
+                        value={selectedEmbeddingModel}
+                        onChange={onEmbeddingModelChange}
+                        style={{ minWidth: 200, justifyContent: "center", alignItems: "flex-end" }}
+                        placeholder={t("knowledgeBase.create.embeddingModelPlaceholder") || "Select embedding model"}
+                        options={(availableEmbeddingModels || []).map((model) => ({
+                          value: model.displayName,
+                          label: model.displayName,
+                          disabled: model.connect_status === "unavailable",
+                        }))}
+                      />
+                    )}
+                    {/* User groups multi-select */}
+                    <Can permission="kb.groups:update">
+                      <Select
+                        mode="multiple"
+                        value={isGroupSelectDisabled ? [] : selectedGroupIds}
+                        onChange={onSelectedGroupIdsChange}
+                        style={{ minWidth: 200, justifyContent: "center", alignItems: "flex-end" }}
+                        placeholder={t("knowledgeBase.create.permission.groupPlaceholder")}
+                        options={groupOptions}
+                        maxTagCount={2}
+                        allowClear
+                        disabled={isGroupSelectDisabled}
+                      />
+                    </Can>
+                    {/* Group permission dropdown */}
+                    <Can permission="kb.groups:update">
+                      <Select
+                        value={ingroupPermission}
+                        onChange={onIngroupPermissionChange}
+                        style={{ width: 160, justifyContent: "center", alignItems: "flex-end" }}
+                        placeholder={t("knowledgeBase.ingroup.permission.DEFAULT")}
+                        options={permissionOptions}
+                      />
+                    </Can>
                   </div>
                 </div>
               ) : (
@@ -567,6 +621,7 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
                 currentEmbeddingModel={currentModel}
                 knowledgeBaseEmbeddingModel={knowledgeBaseModel}
                 onChunkCountChange={onChunkCountChange}
+                permission={permission}
               />
             </div>
           ) : showDetail ? (
@@ -599,7 +654,7 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
                     onClick={handleAutoSummary}
                     loading={isSummarizing}
                     disabled={
-                      !knowledgeBaseName || isSummarizing || !selectedModel
+                      !knowledgeBaseName || isSummarizing || !selectedModel || isReadOnlyMode
                     }
                   >
                     {t("document.button.autoSummary")}
@@ -607,20 +662,59 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
                 </div>
               </div>
               <div className="flex-1 min-h-0 mb-5 border border-gray-300 rounded-md overflow-auto">
-                <div className="p-5 text-lg leading-[1.7] whitespace-pre-wrap">
-                  <MarkdownRenderer content={summary} />
-                </div>
+                  {isReadOnlyMode ? (
+                    <div className="p-5 text-lg leading-[1.7] whitespace-pre-wrap">
+                      <MarkdownRenderer content={summary} />
+                    </div>
+                  ) : isSummarizing ? (
+                    <div className="p-5 text-lg leading-[1.7] whitespace-pre-wrap">
+                      <MarkdownRenderer content={summary} />
+                    </div>
+                  ) : (
+                    <div
+                          className="w-full h-full cursor-text hover:bg-gray-50"
+                      onClick={() => {
+                        if (!isSummarizing) {
+                          setIsEditing(true);
+                        }
+                      }}
+                    >
+                      {isEditing ? (
+                        <TextArea
+                          value={summary}
+                          onChange={(e) => setSummary(e.target.value)}
+                          onBlur={() => setIsEditing(false)}
+                              className="w-full h-full border-0 resize-none focus:shadow-none"
+                          style={{
+                            height: '100%',
+                            padding: '20px',
+                            fontSize: '18px',
+                            lineHeight: '1.7',
+                            whiteSpace: 'pre-wrap',
+                          }}
+                          autoFocus
+                          placeholder={t("document.summary.placeholder")}
+                        />
+                      ) : (
+                              <div className="p-5 text-lg leading-[1.7] whitespace-pre-wrap">
+                                <MarkdownRenderer content={summary} />
+                              </div>
+                      )}
+                    </div>
+                  )}
               </div>
               <div className="flex gap-3 justify-end">
-                <Button
-                  type="primary"
-                  size="large"
-                  onClick={handleSaveSummary}
-                  loading={isSaving}
-                  disabled={!summary || isSaving}
-                >
-                  {t("common.save")}
-                </Button>
+                  {!isReadOnlyMode && (
+                    <Button
+                      type="primary"
+                      size="large"
+                      onClick={handleSaveSummary}
+                      loading={isSaving}
+                      disabled={!summary || isSaving}
+                    >
+                      {t("common.save")}
+                    </Button>
+                  )}
                 <Button
                   size="large"
                   onClick={() => {
@@ -750,18 +844,40 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
                       </td>
                       {!isDataMate && (
                         <td className={LAYOUT.CELL_PADDING}>
-                          <button
-                            onClick={() => onDelete(doc.id)}
-                            className={LAYOUT.ACTION_TEXT}
-                            title={
-                              doc.status === DOCUMENT_STATUS.PROCESSING ||
-                              doc.status === DOCUMENT_STATUS.FORWARDING
-                                ? t("document.delete.terminateTask")
-                                : undefined
-                            }
-                          >
-                            {t("common.delete")}
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => {
+                                const objectName =  extractObjectNameFromUrl(doc.id) || undefined;
+                                if (!objectName) {
+                                  message.warning(t("filePreview.previewFailed"));
+                                  return;
+                                }
+
+                                setSelectedFile({
+                                  objectName,
+                                  fileName: doc.name,
+                                  fileType: doc.type,
+                                  fileSize: doc.size,
+                                });
+                              }}
+                              className={LAYOUT.ACTION_TEXT}
+                              title={t("common.preview")}
+                            >
+                              {t("common.preview")}
+                            </button>
+                            <button
+                              onClick={() => onDelete(doc.id)}
+                              className={LAYOUT.ACTION_TEXT}
+                              title={
+                                doc.status === DOCUMENT_STATUS.PROCESSING ||
+                                doc.status === DOCUMENT_STATUS.FORWARDING
+                                  ? t("document.delete.terminateTask")
+                                  : undefined
+                              }
+                            >
+                              {t("common.delete")}
+                            </button>
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -809,6 +925,18 @@ const DocumentListContainer = forwardRef<DocumentListRef, DocumentListProps>(
               modelMismatch={modelMismatch}
             />
           ))}
+
+        {/* File preview drawer */}
+        {selectedFile && (
+          <FilePreviewDrawer
+            open={!!selectedFile}
+            objectName={selectedFile.objectName}
+            fileName={selectedFile.fileName}
+            fileType={selectedFile.fileType}
+            fileSize={selectedFile.fileSize}
+            onClose={() => setSelectedFile(null)}
+          />
+        )}
       </div>
     );
   }

@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import yaml
 
@@ -17,20 +17,15 @@ def get_prompt_template(template_type: str, language: str = LANGUAGE["ZH"], **kw
         template_type: Template type, supports the following values:
             - 'prompt_generate': Prompt generation template
             - 'agent': Agent template including manager and managed agents
-            - 'knowledge_summary': Knowledge summary template
-            - 'analyze_file': File analysis template
             - 'generate_title': Title generation template
             - 'document_summary': Document summary template (Map stage)
             - 'cluster_summary_reduce': Cluster summary reduce template (Reduce stage)
-            - 'cluster_summary_agent': Cluster summary agent template (legacy)
         language: Language code ('zh' or 'en')
         **kwargs: Additional parameters, for agent type need to pass is_manager parameter
 
     Returns:
         dict: Loaded prompt template
     """
-    logger.info(
-        f"Getting prompt template for type: {template_type}, language: {language}, kwargs: {kwargs}")
 
     # Define template path mapping
     template_paths = {
@@ -48,14 +43,6 @@ def get_prompt_template(template_type: str, language: str = LANGUAGE["ZH"], **kw
                 'managed': 'backend/prompts/managed_system_prompt_template_en.yaml'
             }
         },
-        'knowledge_summary': {
-            LANGUAGE["ZH"]: 'backend/prompts/knowledge_summary_agent_zh.yaml',
-            LANGUAGE["EN"]: 'backend/prompts/knowledge_summary_agent_en.yaml'
-        },
-        'analyze_file': {
-            LANGUAGE["ZH"]: 'backend/prompts/analyze_file_zh.yaml',
-            LANGUAGE["EN"]: 'backend/prompts/analyze_file_en.yaml'
-        },
         'generate_title': {
             LANGUAGE["ZH"]: 'backend/prompts/utils/generate_title_zh.yaml',
             LANGUAGE["EN"]: 'backend/prompts/utils/generate_title_en.yaml'
@@ -68,9 +55,9 @@ def get_prompt_template(template_type: str, language: str = LANGUAGE["ZH"], **kw
             LANGUAGE["ZH"]: 'backend/prompts/cluster_summary_reduce_zh.yaml',
             LANGUAGE["EN"]: 'backend/prompts/cluster_summary_reduce_en.yaml'
         },
-        'cluster_summary_agent': {
-            LANGUAGE["ZH"]: 'backend/prompts/cluster_summary_agent_zh.yaml',
-            LANGUAGE["EN"]: 'backend/prompts/cluster_summary_agent_en.yaml'
+        'skill_creation_simple': {
+            LANGUAGE["ZH"]: 'backend/prompts/skill_creation_simple_zh.yaml',
+            LANGUAGE["EN"]: 'backend/prompts/skill_creation_simple_en.yaml'
         }
     }
 
@@ -124,32 +111,6 @@ def get_agent_prompt_template(is_manager: bool, language: str = LANGUAGE["ZH"]) 
     return get_prompt_template('agent', language, is_manager=is_manager)
 
 
-def get_knowledge_summary_prompt_template(language: str = 'zh') -> Dict[str, Any]:
-    """
-    Get knowledge summary prompt template
-
-    Args:
-        language: Language code ('zh' or 'en')
-
-    Returns:
-        dict: Loaded prompt template configuration
-    """
-    return get_prompt_template('knowledge_summary', language)
-
-
-def get_analyze_file_prompt_template(language: str = 'zh') -> Dict[str, Any]:
-    """
-    Get file analysis prompt template
-
-    Args:
-        language: Language code ('zh' or 'en')
-
-    Returns:
-        dict: Loaded prompt template configuration
-    """
-    return get_prompt_template('analyze_file', language)
-
-
 def get_generate_title_prompt_template(language: str = 'zh') -> Dict[str, Any]:
     """
     Get title generation prompt template
@@ -189,14 +150,62 @@ def get_cluster_summary_reduce_prompt_template(language: str = LANGUAGE["ZH"]) -
     return get_prompt_template('cluster_summary_reduce', language)
 
 
-def get_cluster_summary_agent_prompt_template(language: str = LANGUAGE["ZH"]) -> Dict[str, Any]:
+def get_skill_creation_simple_prompt_template(
+    language: str = LANGUAGE["ZH"],
+    existing_skill: Optional[Dict[str, Any]] = None
+) -> Dict[str, str]:
     """
-    Get cluster summary agent prompt template (legacy)
+    Get skill creation simple prompt template with Jinja2 rendering.
+
+    This template is structured YAML with system_prompt and user_prompt sections.
+    Supports Jinja2 template syntax for dynamic content based on existing_skill.
 
     Args:
         language: Language code ('zh' or 'en')
+        existing_skill: Optional dict containing existing skill info for update scenarios.
+            Expected keys: name, description, tags, content
 
     Returns:
-        dict: Loaded cluster summary agent prompt template configuration
+        Dict[str, str]: Template with keys 'system_prompt' and 'user_prompt', rendered with variables
     """
-    return get_prompt_template('cluster_summary_agent', language)
+    from jinja2 import Template
+
+    template_path_map = {
+        LANGUAGE["ZH"]: 'backend/prompts/skill_creation_simple_zh.yaml',
+        LANGUAGE["EN"]: 'backend/prompts/skill_creation_simple_en.yaml'
+    }
+
+    template_path = template_path_map.get(language, template_path_map[LANGUAGE["ZH"]])
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(current_dir)
+    absolute_template_path = os.path.join(backend_dir, template_path.replace('backend/', ''))
+
+    with open(absolute_template_path, 'r', encoding='utf-8') as f:
+        template_data = yaml.safe_load(f)
+
+    # Prepare template context with existing_skill info
+    context = {
+        "existing_skill": existing_skill
+    }
+
+    # Render templates with Jinja2
+    system_prompt_raw = template_data.get("system_prompt", "")
+    user_prompt_raw = template_data.get("user_prompt", "")
+
+    try:
+        system_prompt = Template(system_prompt_raw).render(**context)
+    except Exception as e:
+        logger.warning(f"Failed to render system_prompt template: {e}, using raw content")
+        system_prompt = system_prompt_raw
+
+    try:
+        user_prompt = Template(user_prompt_raw).render(**context)
+    except Exception as e:
+        logger.warning(f"Failed to render user_prompt template: {e}, using raw content")
+        user_prompt = user_prompt_raw
+
+    return {
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt
+    }

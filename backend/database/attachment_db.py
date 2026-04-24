@@ -169,6 +169,42 @@ def get_file_size_from_minio(object_name: str, bucket: Optional[str] = None) -> 
     return minio_client.get_file_size(object_name, bucket)
 
 
+def file_exists(object_name: str, bucket: Optional[str] = None) -> bool:
+    """
+    Check if a file exists in the bucket.
+    
+    Args:
+        object_name: Object name in storage
+        bucket: Bucket name, if not specified will use default bucket
+        
+    Returns:
+        bool: True if file exists, False otherwise
+    """
+    try:
+        return minio_client.file_exists(object_name, bucket)
+    except Exception:
+        return False
+
+
+def copy_file(source_object: str, dest_object: str, bucket: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Copy a file within the same bucket (atomic operation in MinIO).
+    
+    Args:
+        source_object: Source object name
+        dest_object: Destination object name
+        bucket: Bucket name, if not specified will use default bucket
+        
+    Returns:
+        Dict[str, Any]: Result containing success flag and error message (if any)
+    """
+    success, result = minio_client.copy_file(source_object, dest_object, bucket)
+    if success:
+        return {"success": True, "object_name": result}
+    else:
+        return {"success": False, "error": result}
+
+
 def list_files(prefix: str = "", bucket: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     List files in bucket
@@ -242,6 +278,38 @@ def get_file_stream(object_name: str, bucket: Optional[str] = None) -> Optional[
         return None
 
 
+def get_file_stream_raw(object_name: str, bucket: Optional[str] = None) -> Optional[Any]:
+    """
+    Get raw stream object from MinIO storage without reading it into memory.
+
+    Args:
+        object_name: Object name in MinIO
+        bucket: Bucket name, if not specified use default bucket
+
+    Returns:
+        Raw boto3 Body stream on success, or None if failed
+    """
+    success, result = minio_client.get_file_stream(object_name, bucket)
+    return result if success else None
+
+
+def get_file_range(object_name: str, start: int, end: int, bucket: Optional[str] = None) -> Optional[Any]:
+    """
+    Get a byte-range stream from MinIO storage.
+
+    Args:
+        object_name: Object name in MinIO
+        start: Start byte offset (inclusive)
+        end: End byte offset (inclusive), matching HTTP Range semantics.
+        bucket: Bucket name, if not specified use default bucket
+
+    Returns:
+        Raw boto3 Body stream on success, or None if failed
+    """
+    success, result = minio_client.get_file_range(object_name, start, end, bucket)
+    return result if success else None
+
+
 def get_content_type(file_path: str) -> str:
     """
     Get content type based on file extension
@@ -269,6 +337,7 @@ def get_content_type(file_path: str) -> str:
                   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
                   '.txt': 'text/plain',
                   '.csv': 'text/csv',
+                  '.md': 'text/markdown',
                   '.html': 'text/html',
                   '.htm': 'text/html',
                   '.json': 'application/json',

@@ -1,4 +1,5 @@
 import { STATUS_CODES } from "@/const/auth";
+import { ErrorCode } from "@/const/errorCode";
 import { handleSessionExpired } from "@/lib/session";
 import log from "@/lib/logger";
 import type { MarketAgentListParams } from "@/types/market";
@@ -16,6 +17,8 @@ export const API_ENDPOINTS = {
     currentUserInfo: `${API_BASE_URL}/user/current_user_info`,
     serviceHealth: `${API_BASE_URL}/user/service_health`,
     revoke: `${API_BASE_URL}/user/revoke`,
+    tokens: `${API_BASE_URL}/user/tokens`,
+    deleteToken: (tokenId: number) => `${API_BASE_URL}/user/tokens/${tokenId}`,
   },
   conversation: {
     list: `${API_BASE_URL}/conversation/list`,
@@ -45,6 +48,7 @@ export const API_ENDPOINTS = {
     regenerateNameBatch: `${API_BASE_URL}/agent/regenerate_name`,
     searchInfo: `${API_BASE_URL}/agent/search_info`,
     callRelationship: `${API_BASE_URL}/agent/call_relationship`,
+    byName: (agentName: string) => `${API_BASE_URL}/agent/by-name/${encodeURIComponent(agentName)}`,
     clearNew: (agentId: string | number) => `${API_BASE_URL}/agent/clear_new/${agentId}`,
     publish: (agentId: number) => `${API_BASE_URL}/agent/${agentId}/publish`,
     versions: {
@@ -55,6 +59,7 @@ export const API_ENDPOINTS = {
       rollback: (agentId: number, versionNo: number) => `${API_BASE_URL}/agent/${agentId}/versions/${versionNo}/rollback`,
       compare: (agentId: number) => `${API_BASE_URL}/agent/${agentId}/versions/compare`,
       delete: (agentId: number, versionNo: number) => `${API_BASE_URL}/agent/${agentId}/versions/${versionNo}`,
+      update: (agentId: number, versionNo: number) => `${API_BASE_URL}/agent/${agentId}/versions/${versionNo}`,
     },
   },
   tool: {
@@ -65,6 +70,10 @@ export const API_ENDPOINTS = {
     validate: `${API_BASE_URL}/tool/validate`,
     loadConfig: (toolId: number) =>
       `${API_BASE_URL}/tool/load_config/${toolId}`,
+    importOpenapi: `${API_BASE_URL}/tool/import_openapi`,
+    outerApiTools: `${API_BASE_URL}/tool/outer_api_tools`,
+    deleteOuterApiTool: (toolId: number) =>
+      `${API_BASE_URL}/tool/outer_api_tools/${toolId}`,
   },
   prompt: {
     generate: `${API_BASE_URL}/prompt/generate`,
@@ -87,6 +96,13 @@ export const API_ENDPOINTS = {
       queryParams.append("download", download);
       if (filename) queryParams.append("filename", filename);
       return `${API_BASE_URL}/file/download/${objectName}?${queryParams.toString()}`;
+    },
+    preview: (objectName: string, filename?: string) => {
+      const queryParams = new URLSearchParams();
+      if (filename) queryParams.append("filename", filename);
+      const queryString = queryParams.toString();
+      const suffix = queryString ? `?${queryString}` : "";
+      return `${API_BASE_URL}/file/preview/${objectName}${suffix}`;
     },
     datamateDownload: (params: {
       url?: string;
@@ -182,6 +198,10 @@ export const API_ENDPOINTS = {
   dify: {
     datasets: `${API_BASE_URL}/dify/datasets`,
   },
+  idata: {
+    knowledgeSpaces: `${API_BASE_URL}/idata/knowledge-space`,
+    datasets: `${API_BASE_URL}/idata/datasets`,
+  },
   datamate: {
     syncDatamateKnowledges: `${API_BASE_URL}/datamate/sync_datamate_knowledges`,
     testConnection: `${API_BASE_URL}/datamate/test_connection`,
@@ -212,6 +232,49 @@ export const API_ENDPOINTS = {
       `${API_BASE_URL}/mcp/container/${containerId}/logs`,
     deleteContainer: (containerId: string) =>
       `${API_BASE_URL}/mcp/container/${containerId}`,
+    record: (mcpId: number) => `${API_BASE_URL}/mcp/record/${mcpId}`,
+  },
+  // A2A Client endpoints
+  a2a: {
+    // External agent discovery
+    discoverUrl: `${API_BASE_URL}/a2a/client/discover/url`,
+    discoverNacos: `${API_BASE_URL}/a2a/client/discover/nacos`,
+    // External agent management
+    agents: `${API_BASE_URL}/a2a/client/agents`,
+    agent: (agentId: string) => `${API_BASE_URL}/a2a/client/agents/${agentId}`,
+    agentRefresh: (agentId: string) => `${API_BASE_URL}/a2a/client/agents/${agentId}/refresh`,
+    agentProtocol: (agentId: string) => `${API_BASE_URL}/a2a/client/agents/${agentId}/protocol`,
+    // External agent relations
+    relations: `${API_BASE_URL}/a2a/client/relations`,
+    relation: (localAgentId: number, externalAgentId: number) =>
+      `${API_BASE_URL}/a2a/client/relations?local_agent_id=${localAgentId}&external_agent_id=${externalAgentId}`,
+    subAgents: (localAgentId: number) => `${API_BASE_URL}/a2a/client/sub-agents/${localAgentId}`,
+    externalRelations: (localAgentId: number) => `${API_BASE_URL}/a2a/client/relations/${localAgentId}`,
+    // Nacos config management
+    nacosConfigs: `${API_BASE_URL}/a2a/client/nacos-configs`,
+    nacosConfig: (configId: string) => `${API_BASE_URL}/a2a/client/nacos-configs/${configId}`,
+    // A2A Server management
+    serverAgents: `${API_BASE_URL}/a2a/management/agents`,
+    serverAgent: (agentId: number) => `${API_BASE_URL}/a2a/management/agents/${agentId}`,
+    serverAgentEnable: (agentId: number) => `${API_BASE_URL}/a2a/management/agents/${agentId}/enable`,
+    serverAgentDisable: (agentId: number) => `${API_BASE_URL}/a2a/management/agents/${agentId}/disable`,
+    serverAgentSettings: (agentId: number) => `${API_BASE_URL}/a2a/management/agents/${agentId}/settings`,
+  },
+  skills: {
+    list: `${API_BASE_URL}/skills`,
+    create: `${API_BASE_URL}/skills`,
+    upload: `${API_BASE_URL}/skills/upload`,
+    get: (skillName: string) => `${API_BASE_URL}/skills/${skillName}`,
+    update: (skillName: string) => `${API_BASE_URL}/skills/${skillName}`,
+    updateUpload: (skillName: string) => `${API_BASE_URL}/skills/${skillName}/upload`,
+    delete: (skillName: string) => `${API_BASE_URL}/skills/${skillName}`,
+    deleteFile: (skillName: string, filePath: string) => `${API_BASE_URL}/skills/${skillName}/files/${filePath}`,
+    files: (skillName: string) => `${API_BASE_URL}/skills/${skillName}/files`,
+    fileContent: (skillName: string, filePath: string) =>
+      `${API_BASE_URL}/skills/${skillName}/files/${filePath}`,
+    instanceList: `${API_BASE_URL}/skills/instance/list`,
+    instanceUpdate: `${API_BASE_URL}/skills/instance/update`,
+    createSimple: `${API_BASE_URL}/skills/create-simple`,
   },
   memory: {
     // ---------------- Memory configuration ----------------
@@ -258,7 +321,7 @@ export const API_ENDPOINTS = {
       `${API_BASE_URL}/market/agents/${agentId}/mcp_servers`,
   },
   tenant: {
-    list: `${API_BASE_URL}/tenants`,
+    list: `${API_BASE_URL}/tenants/tenant-list`,
     create: `${API_BASE_URL}/tenants`,
     detail: (tenantId: string) => `${API_BASE_URL}/tenants/${tenantId}`,
     update: (tenantId: string) => `${API_BASE_URL}/tenants/${tenantId}`,
@@ -299,7 +362,7 @@ export const API_ENDPOINTS = {
 // Common error handling
 export class ApiError extends Error {
   constructor(
-    public code: number,
+    public code: string | number,
     message: string
   ) {
     super(message);
@@ -317,20 +380,42 @@ export const fetchWithErrorHandling = async (
 
     // Handle HTTP errors
     if (!response.ok) {
-      // Check if it's a session expired error (401)
-      if (response.status === 401) {
+      // Try to parse JSON response for business error code first
+      let errorCode = response.status;
+      let errorMessage = `Request failed: ${response.status}`;
+      const errorText = await response.text();
+
+      let parsedErrorData = null;
+      try {
+        const errorData = JSON.parse(errorText);
+        if (errorData && errorData.code) {
+          parsedErrorData = errorData;
+          errorCode = errorData.code;
+          errorMessage = errorData.message || errorMessage;
+        } else {
+          errorMessage = errorText || errorMessage;
+        }
+      } catch {
+        // Not JSON, use text as message
+        errorMessage = errorText || errorMessage;
+      }
+
+      // Check if it's a session expiration error based on business error code
+      // TOKEN_EXPIRED = "000203", TOKEN_INVALID = "000204"
+      const errorCodeStr = String(errorCode);
+      if (
+        errorCodeStr === ErrorCode.TOKEN_EXPIRED ||
+        errorCodeStr === ErrorCode.TOKEN_INVALID
+      ) {
         handleSessionExpired();
-        throw new ApiError(
-          STATUS_CODES.TOKEN_EXPIRED,
-          "Login expired, please login again"
-        );
+        throw new ApiError(errorCode, errorMessage);
       }
 
       // Handle custom 499 error code (client closed connection)
       if (response.status === 499) {
         handleSessionExpired();
         throw new ApiError(
-          STATUS_CODES.TOKEN_EXPIRED,
+          ErrorCode.TOKEN_EXPIRED,
           "Connection disconnected, session may have expired"
         );
       }
@@ -338,17 +423,12 @@ export const fetchWithErrorHandling = async (
       // Handle request entity too large error (413)
       if (response.status === 413) {
         throw new ApiError(
-          STATUS_CODES.REQUEST_ENTITY_TOO_LARGE,
-          "REQUEST_ENTITY_TOO_LARGE"
+          ErrorCode.FILE_TOO_LARGE,
+          "File size exceeds limit."
         );
       }
 
-      // Other HTTP errors
-      const errorText = await response.text();
-      throw new ApiError(
-        response.status,
-        errorText || `Request failed: ${response.status}`
-      );
+      throw new ApiError(errorCode, errorMessage);
     }
 
     return response;

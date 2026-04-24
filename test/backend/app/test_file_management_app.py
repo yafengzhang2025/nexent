@@ -55,6 +55,16 @@ async def _stub_preprocess_files_generator(*_: Any, **__: Any) -> AsyncGenerator
     yield "data: {\"type\": \"progress\", \"progress\": 0}\n\n"
     yield "data: {\"type\": \"complete\", \"progress\": 100}\n\n"
 
+async def _stub_resolve_preview_file(object_name: str):
+    return object_name, "application/pdf", 1024
+
+def _stub_get_preview_stream(actual_object_name, start=None, end=None):
+    mock_s = MagicMock()
+    mock_s.iter_chunks = MagicMock(return_value=iter([b"PDF content"]))
+    return mock_s
+
+sfms_stub.resolve_preview_file = _stub_resolve_preview_file
+sfms_stub.get_preview_stream = _stub_get_preview_stream
 sfms_stub.upload_to_minio = _stub_upload_to_minio
 sfms_stub.upload_files_impl = _stub_upload_files_impl
 sfms_stub.get_file_url_impl = _stub_get_file_url_impl
@@ -101,8 +111,21 @@ class ProcessParams:  # minimal stub
         self.index_name = index_name
         self.authorization = authorization
 model_stub.ProcessParams = ProcessParams
-sys.modules["consts.model"] = model_stub
+sys.modules.setdefault("consts.model", model_stub)
 setattr(consts_pkg, "model", model_stub)
+
+# Stub consts.exceptions with real exception classes so isinstance checks work
+exceptions_stub = types.ModuleType("consts.exceptions")
+class NotFoundException(Exception): pass
+class OfficeConversionException(Exception): pass
+class UnsupportedFileTypeException(Exception): pass
+class FileTooLargeException(Exception): pass
+exceptions_stub.NotFoundException = NotFoundException
+exceptions_stub.OfficeConversionException = OfficeConversionException
+exceptions_stub.UnsupportedFileTypeException = UnsupportedFileTypeException
+exceptions_stub.FileTooLargeException = FileTooLargeException
+sys.modules["consts.exceptions"] = exceptions_stub
+setattr(consts_pkg, "exceptions", exceptions_stub)
 
 
 # Import the module under test after stubbing deps
@@ -442,6 +465,40 @@ def test_build_content_disposition_header_exception_handling(monkeypatch):
     result = file_management_app.build_content_disposition_header("测试.pdf")
     assert 'attachment; filename=' in result
     assert 'filename*=UTF-8' not in result
+
+
+def test_build_content_disposition_header_inline_ascii():
+    """Test build_content_disposition_header with inline=True for ASCII filename"""
+    result = file_management_app.build_content_disposition_header("test.pdf", inline=True)
+    assert result == 'inline; filename="test.pdf"'
+    assert 'attachment' not in result
+
+
+def test_build_content_disposition_header_inline_non_ascii():
+    """Test build_content_disposition_header with inline=True for non-ASCII filename"""
+    result = file_management_app.build_content_disposition_header("测试文档.pdf", inline=True)
+    assert 'inline; filename=' in result
+    assert 'attachment' not in result
+    assert 'filename*=UTF-8' in result
+
+
+def test_build_content_disposition_header_inline_false_explicit():
+    """Test build_content_disposition_header with inline=False explicitly"""
+    result = file_management_app.build_content_disposition_header("test.pdf", inline=False)
+    assert result == 'attachment; filename="test.pdf"'
+    assert 'inline' not in result
+
+
+def test_build_content_disposition_header_inline_exception_handling(monkeypatch):
+    """Test build_content_disposition_header inline mode exception handling"""
+    def boom(_value: str, safe: str = "") -> str:
+        raise RuntimeError("quote failure")
+
+    monkeypatch.setattr("backend.apps.file_management_app.quote", boom)
+
+    result = file_management_app.build_content_disposition_header("中文.pdf", inline=True)
+    assert 'inline; filename=' in result
+    assert 'attachment' not in result
 
 
 # --- Tests for get_storage_file with filename parameter ---
@@ -872,3 +929,481 @@ def test_build_datamate_url_from_parts_empty_base_url():
     assert "base_url is required" in str(ei.value)
 
 
+# --- Tests for preview_file endpoint ---
+
+def _make_mock_stream(content: bytes = b"content"):
+    """Helper: return a mock boto3 Body with iter_chunks."""
+    mock_s = MagicMock()
+    mock_s.iter_chunks = MagicMock(return_value=iter([content]))
+    mock_s.close = MagicMock()
+    return mock_s
+
+
+@pytest.mark.asyncio
+async def test_preview_file_pdf_success(monkeypatch):
+    """PDF file: 200 response with inline disposition, Accept-Ranges, ETag."""
+    mock_stream = _make_mock_stream(b"PDF content")
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("documents/test.pdf", "application/pdf", 2048)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=mock_stream))
+
+    resp = await file_management_app.preview_file(
+        object_name="documents/test.pdf",
+        filename="test.pdf",
+        range_header=None,
+    )
+
+    assert resp.media_type == "application/pdf"
+    assert resp.status_code == 200
+    cd = resp.headers.get("content-disposition", "")
+    assert "inline" in cd
+    assert "test.pdf" in cd
+    assert resp.headers.get("accept-ranges") == "bytes"
+    assert resp.headers.get("content-length") == "2048"
+    assert resp.headers.get("cache-control") == "public, max-age=3600"
+    assert "documents/test.pdf" in resp.headers.get("etag", "")
+    assert resp.background is not None
+    await resp.background()
+    mock_stream.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_preview_file_image_success(monkeypatch):
+    """Image file: 200 response with correct content type."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("images/photo.png", "image/png", 512)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream(b"PNG data")))
+
+    resp = await file_management_app.preview_file(
+        object_name="images/photo.png",
+        filename="photo.png",
+        range_header=None,
+    )
+
+    assert resp.media_type == "image/png"
+    assert "inline" in resp.headers.get("content-disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_preview_file_text_success(monkeypatch):
+    """Text file: 200 response with correct content type."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("files/readme.txt", "text/plain", 128)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream(b"Hello World")))
+
+    resp = await file_management_app.preview_file(
+        object_name="files/readme.txt",
+        filename="readme.txt",
+        range_header=None,
+    )
+
+    assert resp.media_type == "text/plain"
+    assert "inline" in resp.headers.get("content-disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_preview_file_without_filename_extracts_from_path(monkeypatch):
+    """No filename parameter: extracts name from the last path segment."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("folder/subfolder/document.pdf", "application/pdf", 1024)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream()))
+
+    resp = await file_management_app.preview_file(
+        object_name="folder/subfolder/document.pdf",
+        filename=None,
+        range_header=None,
+    )
+
+    assert "document.pdf" in resp.headers.get("content-disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_preview_file_chinese_filename(monkeypatch):
+    """Chinese filename: RFC 5987 UTF-8 encoded in Content-Disposition."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("documents/test.pdf", "application/pdf", 1024)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream()))
+
+    resp = await file_management_app.preview_file(
+        object_name="documents/test.pdf",
+        filename="测试文档.pdf",
+        range_header=None,
+    )
+
+    cd = resp.headers.get("content-disposition", "")
+    assert "inline" in cd
+    assert "filename*=UTF-8" in cd or "测试文档" in cd
+
+
+@pytest.mark.asyncio
+async def test_preview_file_simple_object_name_without_slash(monkeypatch):
+    """Object name without slash: uses it directly as display filename."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("simple.pdf", "application/pdf", 256)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream()))
+
+    resp = await file_management_app.preview_file(
+        object_name="simple.pdf",
+        filename=None,
+        range_header=None,
+    )
+
+    assert "simple.pdf" in resp.headers.get("content-disposition", "")
+
+
+@pytest.mark.asyncio
+async def test_preview_file_office_converted_to_pdf(monkeypatch):
+    """Office document: resolve returns PDF path; response is application/pdf."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("preview/converted/report_abc.pdf", "application/pdf", 8192)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream(b"Converted PDF")))
+
+    resp = await file_management_app.preview_file(
+        object_name="documents/report.docx",
+        filename="report.docx",
+        range_header=None,
+    )
+
+    assert resp.media_type == "application/pdf"
+    assert "inline" in resp.headers.get("content-disposition", "")
+
+
+# --- Range request tests ---
+
+@pytest.mark.asyncio
+async def test_preview_file_range_request_returns_206(monkeypatch):
+    """Valid Range header: 206 with Content-Range and correct Content-Length."""
+    mock_stream = _make_mock_stream(b"partial chunk")
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 10000)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=mock_stream))
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/test.pdf",
+        filename=None,
+        range_header="bytes=0-4095",
+    )
+
+    assert resp.status_code == 206
+    assert resp.headers.get("content-range") == "bytes 0-4095/10000"
+    assert resp.headers.get("content-length") == "4096"
+    assert resp.headers.get("accept-ranges") == "bytes"
+    assert resp.background is not None
+    await resp.background()
+    mock_stream.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_preview_file_range_suffix_form(monkeypatch):
+    """Suffix range (bytes=-N): 206 with correct Content-Range."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 10000)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream(b"tail chunk")))
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/test.pdf",
+        filename=None,
+        range_header="bytes=-500",
+    )
+
+    assert resp.status_code == 206
+    assert resp.headers.get("content-range") == "bytes 9500-9999/10000"
+    assert resp.headers.get("content-length") == "500"
+
+
+@pytest.mark.asyncio
+async def test_preview_file_range_open_ended(monkeypatch):
+    """Open-ended range (bytes=N-): 206 reaching end of file."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 1000)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream",
+                        MagicMock(return_value=_make_mock_stream(b"tail")))
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/test.pdf",
+        filename=None,
+        range_header="bytes=500-",
+    )
+
+    assert resp.status_code == 206
+    assert resp.headers.get("content-range") == "bytes 500-999/1000"
+    assert resp.headers.get("content-length") == "500"
+
+
+@pytest.mark.asyncio
+async def test_preview_file_empty_file_returns_200_without_stream(monkeypatch):
+    """Empty file: return 200 with zero content length and no stream fetch."""
+    mock_get_stream = MagicMock()
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/empty.txt", "text/plain", 0)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream", mock_get_stream)
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/empty.txt",
+        filename="empty.txt",
+        range_header=None,
+    )
+
+    assert resp.status_code == 200
+    assert resp.media_type == "text/plain"
+    assert resp.headers.get("content-length") == "0"
+    mock_get_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preview_file_empty_file_ignores_range_and_returns_200(monkeypatch):
+    """Empty file with Range header: still return 200 empty response."""
+    mock_get_stream = MagicMock()
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/empty.txt", "text/plain", 0)))
+    monkeypatch.setattr(file_management_app, "get_preview_stream", mock_get_stream)
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/empty.txt",
+        filename="empty.txt",
+        range_header="bytes=0-10",
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers.get("content-length") == "0"
+    mock_get_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preview_file_invalid_range_returns_416(monkeypatch):
+    """Out-of-bounds Range: 416 with Content-Range: bytes */total."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 10000)))
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/test.pdf",
+        filename=None,
+        range_header="bytes=20000-30000",
+    )
+
+    assert resp.status_code == 416
+    assert "bytes */10000" in resp.headers.get("content-range", "")
+
+
+@pytest.mark.asyncio
+async def test_preview_file_malformed_range_returns_416(monkeypatch):
+    """Malformed Range header: 416."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 1000)))
+
+    resp = await file_management_app.preview_file(
+        object_name="docs/test.pdf",
+        filename=None,
+        range_header="invalid-range",
+    )
+
+    assert resp.status_code == 416
+
+
+# --- Exception mapping tests ---
+
+@pytest.mark.asyncio
+async def test_preview_file_too_large_error(monkeypatch):
+    """FileTooLargeException from resolve_preview_file → HTTP 413."""
+    _FileTooLargeException = sys.modules["consts.exceptions"].FileTooLargeException
+
+    async def fake_resolve(object_name):
+        raise _FileTooLargeException("File size 110 MB exceeds the 100 MB preview limit")
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file", fake_resolve)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="files/huge.pdf",
+            filename=None,
+            range_header=None,
+        )
+    assert "100 MB" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_not_found_from_resolve(monkeypatch):
+    """NotFoundException from resolve_preview_file → HTTP 404."""
+    _NotFoundException = sys.modules["consts.exceptions"].NotFoundException
+
+    async def fake_resolve(object_name):
+        raise _NotFoundException("The specified key does not exist")
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file", fake_resolve)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="missing/file.pdf",
+            filename=None,
+            range_header=None,
+        )
+    assert "File not found" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_not_found_from_stream(monkeypatch):
+    """NotFoundException from get_preview_stream → HTTP 404."""
+    not_found_exception = sys.modules["consts.exceptions"].NotFoundException
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 1024)))
+
+    def fake_stream(actual_name, start=None, end=None):
+        raise not_found_exception("File not found during streaming")
+
+    monkeypatch.setattr(file_management_app, "get_preview_stream", fake_stream)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="docs/test.pdf",
+            filename=None,
+            range_header=None,
+        )
+    assert "File not found" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_unexpected_error_from_stream(monkeypatch):
+    """Unexpected exception from get_preview_stream should map to HTTP 500."""
+    monkeypatch.setattr(file_management_app, "resolve_preview_file",
+                        AsyncMock(return_value=("docs/test.pdf", "application/pdf", 1024)))
+
+    def fake_stream(actual_name, start=None, end=None):
+        raise RuntimeError("stream broken")
+
+    monkeypatch.setattr(file_management_app, "get_preview_stream", fake_stream)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="docs/test.pdf",
+            filename=None,
+            range_header=None,
+        )
+    assert "Failed to preview file" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_unsupported_format_error(monkeypatch):
+    """UnsupportedFileTypeException from resolve_preview_file → HTTP 400."""
+    _UnsupportedFileTypeException = sys.modules["consts.exceptions"].UnsupportedFileTypeException
+
+    async def fake_resolve(object_name):
+        raise _UnsupportedFileTypeException("Unsupported file format for preview")
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file", fake_resolve)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="files/archive.zip",
+            filename=None,
+            range_header=None,
+        )
+    assert "not supported for preview" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_internal_error(monkeypatch):
+    """Unexpected exception from resolve_preview_file → HTTP 500."""
+    async def fake_resolve(object_name):
+        raise Exception("Internal server error")
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file", fake_resolve)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="files/test.pdf",
+            filename=None,
+            range_header=None,
+        )
+    assert "Failed to preview file" in str(ei.value)
+    assert "Internal server error" not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_preview_file_office_conversion_error(monkeypatch):
+    """OfficeConversionException (subclass of Exception) → HTTP 500."""
+    _OfficeConversionException = sys.modules["consts.exceptions"].OfficeConversionException
+
+    async def fake_resolve(object_name):
+        raise _OfficeConversionException("LibreOffice conversion failed")
+
+    monkeypatch.setattr(file_management_app, "resolve_preview_file", fake_resolve)
+
+    with pytest.raises(Exception) as ei:
+        await file_management_app.preview_file(
+            object_name="files/report.docx",
+            filename=None,
+            range_header=None,
+        )
+    assert "Failed to preview file" in str(ei.value)
+
+
+# --- _parse_range_header unit tests ---
+
+class TestParseRangeHeader:
+    """Unit tests for the _parse_range_header helper."""
+
+    def test_full_range(self):
+        """bytes=start-end returns (start, end)."""
+        assert file_management_app._parse_range_header("bytes=0-1023", 10000) == (0, 1023)
+
+    def test_open_ended_range(self):
+        """bytes=N- returns (N, total_size-1)."""
+        assert file_management_app._parse_range_header("bytes=500-", 1000) == (500, 999)
+
+    def test_suffix_range(self):
+        """bytes=-N returns last N bytes."""
+        assert file_management_app._parse_range_header("bytes=-100", 1000) == (900, 999)
+
+    def test_suffix_range_larger_than_file(self):
+        """bytes=-N where N > total_size: clamps start to 0."""
+        assert file_management_app._parse_range_header("bytes=-5000", 1000) == (0, 999)
+
+    def test_single_byte(self):
+        """Single byte range."""
+        assert file_management_app._parse_range_header("bytes=0-0", 1000) == (0, 0)
+
+    def test_last_byte(self):
+        """Last byte of file."""
+        assert file_management_app._parse_range_header("bytes=999-999", 1000) == (999, 999)
+
+    def test_invalid_unit_returns_none(self):
+        """Non-bytes unit is rejected."""
+        assert file_management_app._parse_range_header("items=0-10", 1000) is None
+
+    def test_start_beyond_file_size_returns_none(self):
+        """Start >= total_size is not satisfiable."""
+        assert file_management_app._parse_range_header("bytes=1000-1099", 1000) is None
+
+    def test_end_beyond_file_size_is_clamped(self):
+        """End >= total_size is clamped to total_size-1 per RFC 7233 §2.1."""
+        assert file_management_app._parse_range_header("bytes=0-1000", 1000) == (0, 999)
+
+    def test_inverted_range_returns_none(self):
+        """end < start is invalid."""
+        assert file_management_app._parse_range_header("bytes=500-100", 1000) is None
+
+    def test_empty_spec_returns_none(self):
+        """bytes= with no range spec."""
+        assert file_management_app._parse_range_header("bytes=-", 1000) is None
+
+    def test_non_numeric_returns_none(self):
+        """Non-numeric values are rejected."""
+        assert file_management_app._parse_range_header("bytes=abc-def", 1000) is None
+
+    def test_missing_dash_returns_none(self):
+        """bytes=N without '-' is malformed and rejected."""
+        assert file_management_app._parse_range_header("bytes=100", 1000) is None
+
+    def test_zero_size_file_returns_none(self):
+        """Empty files do not support satisfiable ranges."""
+        assert file_management_app._parse_range_header("bytes=0-10", 0) is None

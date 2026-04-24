@@ -217,3 +217,44 @@ class StorageClient(ABC):
         """
         pass
 
+    @abstractmethod
+    def copy_file(
+        self,
+        source_object: str,
+        dest_object: str,
+        bucket: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        Copy a file within the same bucket.
+
+        Args:
+            source_object: Source object name
+            dest_object: Destination object name
+            bucket: Bucket name, if not specified use default bucket
+
+        Returns:
+            Tuple[bool, str]: (Success status, Destination object name or error message)
+        """
+        pass
+
+    @abstractmethod
+    def get_file_range(
+        self,
+        object_name: str,
+        start: int,
+        end: int,
+        bucket: Optional[str] = None,
+    ) -> Tuple[bool, Any]:
+        """
+        Get a byte-range slice of an object from storage.
+
+        Args:
+            object_name: Object name
+            start: Start byte offset (inclusive)
+            end: End byte offset (inclusive), matching HTTP Range semantics
+            bucket: Bucket name, if not specified use default bucket
+
+        Returns:
+            Tuple[bool, Any]: (True, raw_body_stream) on success, (False, error_str) on failure
+        """
+        pass

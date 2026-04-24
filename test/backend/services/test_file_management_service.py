@@ -82,6 +82,7 @@ def setup_patches():
         patch('backend.database.attachment_db.get_file_stream', MagicMock()),
         patch('backend.database.attachment_db.delete_file', MagicMock()),
         patch('backend.database.attachment_db.list_files', MagicMock()),
+        patch('backend.services.file_management_service.get_file_size_from_minio', MagicMock(return_value=0)),
         patch('backend.services.file_management_service.save_upload_file', AsyncMock()),
         patch('backend.services.file_management_service.upload_semaphore', MagicMock()),
         patch('backend.services.file_management_service.upload_dir',
@@ -367,6 +368,27 @@ class TestUploadFilesImpl:
             assert uploaded_paths == ["folder/a.txt"]
             assert uploaded_names == ["a.txt"]
             mock_logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_upload_files_impl_minio_conflict_resolution_empty_filename(self):
+        """Empty uploaded filename should be preserved during conflict resolution."""
+        mock_file = MagicMock()
+        mock_file.filename = ""
+
+        minio_return = [
+            {"success": True, "file_name": "", "object_name": "folder/"},
+        ]
+
+        with patch('backend.services.file_management_service.upload_to_minio', AsyncMock(return_value=minio_return)), \
+                patch('backend.services.file_management_service.get_vector_db_core', MagicMock()), \
+                patch('backend.services.file_management_service.ElasticSearchService.list_files', AsyncMock(return_value={"files": []})):
+
+            errors, uploaded_paths, uploaded_names = await upload_files_impl(
+                destination="minio", file=[mock_file], folder="folder", index_name="kb1")
+
+            assert errors == []
+            assert uploaded_paths == ["folder/"]
+            assert uploaded_names == [""]
 
 
 class TestUploadToMinio:
@@ -1011,3 +1033,405 @@ class TestGetLlmModel:
         assert mock_tenant_config.get_model_config.call_count == 2
         assert mock_tenant_config.get_model_config.call_args_list[0][1]["tenant_id"] == "tenant1"
         assert mock_tenant_config.get_model_config.call_args_list[1][1]["tenant_id"] == "tenant2"
+
+
+class TestResolvePreviewFile:
+    """Test cases for resolve_preview_file function"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("object_name,content_type", [
+        ("test/document.pdf", "application/pdf"),
+        ("test/image.png", "image/png"),
+        ("test/image.jpeg", "image/jpeg"),
+        ("test/readme.txt", "text/plain"),
+        ("test/data.csv", "text/csv"),
+        ("test/readme.md", "text/markdown"),
+    ])
+    async def test_direct_types_returned_as_is(self, object_name, content_type):
+        """PDF, images, and text files resolve to themselves without conversion."""
+        from backend.services.file_management_service import resolve_preview_file
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_size_from_minio', return_value=1024), \
+             patch('backend.services.file_management_service.get_content_type', return_value=content_type):
+
+            actual_name, actual_ct, total_size = await resolve_preview_file(object_name)
+
+            assert actual_name == object_name
+            assert actual_ct == content_type
+            assert total_size == 1024
+
+    @pytest.mark.asyncio
+    async def test_office_cache_hit_returns_pdf_path(self):
+        """When a valid cached PDF exists, returns converted PDF path without re-converting."""
+        from backend.services.file_management_service import resolve_preview_file
+
+        docx_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_size_from_minio', side_effect=[2048, 5000]), \
+             patch('backend.services.file_management_service.get_content_type', return_value=docx_type), \
+             patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=True):
+
+            actual_name, actual_ct, total_size = await resolve_preview_file("test/document.docx")
+
+            assert actual_ct == 'application/pdf'
+            assert actual_name.endswith('.pdf')
+            assert total_size == 5000
+
+    @pytest.mark.asyncio
+    async def test_office_cache_miss_triggers_conversion(self):
+        """When no valid cache exists, triggers conversion and returns resulting PDF path."""
+        from backend.services.file_management_service import resolve_preview_file
+
+        docx_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_size_from_minio', side_effect=[2048, 6000]), \
+             patch('backend.services.file_management_service.get_content_type', return_value=docx_type), \
+             patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('backend.services.file_management_service._convert_office_to_cached_pdf',
+                   new_callable=AsyncMock) as mock_convert:
+
+            actual_name, actual_ct, total_size = await resolve_preview_file("test/document.docx")
+
+            mock_convert.assert_called_once()
+            assert actual_ct == 'application/pdf'
+            assert actual_name.endswith('.pdf')
+            assert total_size == 6000
+
+    @pytest.mark.asyncio
+    async def test_file_too_large_raises_exception(self):
+        """Files exceeding FILE_PREVIEW_SIZE_LIMIT raise FileTooLargeException."""
+        from backend.services.file_management_service import resolve_preview_file, FILE_PREVIEW_SIZE_LIMIT
+        from consts.exceptions import FileTooLargeException
+
+        oversized = FILE_PREVIEW_SIZE_LIMIT + 1
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_size_from_minio', return_value=oversized):
+            with pytest.raises(FileTooLargeException) as exc_info:
+                await resolve_preview_file("test/large_file.pdf")
+
+        assert str(FILE_PREVIEW_SIZE_LIMIT // (1024 * 1024)) in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_unsupported_file_type_raises_exception(self):
+        """Unsupported content types raise UnsupportedFileTypeException."""
+        from backend.services.file_management_service import resolve_preview_file
+        from consts.exceptions import UnsupportedFileTypeException
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_size_from_minio', return_value=1024), \
+             patch('backend.services.file_management_service.get_content_type',
+                   return_value='application/octet-stream'):
+
+            with pytest.raises(UnsupportedFileTypeException) as exc_info:
+                await resolve_preview_file("test/unknown.bin")
+
+            assert "Unsupported file type for preview" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_missing_direct_preview_file_raises_not_found(self):
+        """Missing direct-preview file should raise NotFoundException instead of resolving as empty."""
+        from backend.services.file_management_service import resolve_preview_file
+        from consts.exceptions import NotFoundException
+
+        with patch('backend.services.file_management_service.file_exists', return_value=False):
+            with pytest.raises(NotFoundException) as exc_info:
+                await resolve_preview_file("test/missing.pdf")
+
+        assert "File not found" in str(exc_info.value)
+
+
+class TestGetPreviewStream:
+    """Unit tests for get_preview_stream function."""
+
+    def test_full_stream_returned_when_no_range(self):
+        """Returns full stream when start and end are both None."""
+        from backend.services.file_management_service import get_preview_stream
+
+        mock_stream = MagicMock()
+        with patch('backend.services.file_management_service.get_file_stream_raw', return_value=mock_stream) as mock_get:
+            result = get_preview_stream("test/document.pdf")
+            assert result is mock_stream
+            mock_get.assert_called_once_with("test/document.pdf")
+
+    def test_range_stream_returned_when_start_end_given(self):
+        """Returns partial stream when start and end are provided."""
+        from backend.services.file_management_service import get_preview_stream
+
+        mock_stream = MagicMock()
+        with patch('backend.services.file_management_service.get_file_range',
+                   return_value=mock_stream) as mock_get:
+            result = get_preview_stream("test/document.pdf", start=0, end=1023)
+            assert result is mock_stream
+            mock_get.assert_called_once_with("test/document.pdf", 0, 1023)
+
+    def test_raises_not_found_when_stream_is_none(self):
+        """Raises NotFoundException when no-range stream source returns None."""
+        from backend.services.file_management_service import get_preview_stream
+        from consts.exceptions import NotFoundException
+
+        with patch('backend.services.file_management_service.get_file_stream_raw', return_value=None):
+            with pytest.raises(NotFoundException) as exc_info:
+                get_preview_stream("test/missing.pdf")
+
+            assert "File not found" in str(exc_info.value)
+
+    def test_raises_value_error_when_only_one_range_bound_provided(self):
+        """Raises ValueError when start and end are not provided together."""
+        from backend.services.file_management_service import get_preview_stream
+
+        with pytest.raises(ValueError) as exc_info:
+            get_preview_stream("test/document.pdf", start=0)
+
+        assert "provided together" in str(exc_info.value)
+
+
+class TestIsPdfCacheValid:
+    """Unit tests for _is_pdf_cache_valid helper."""
+
+    def test_returns_true_when_cache_exists_and_readable(self):
+        """Returns True when file exists and range read succeeds."""
+        from backend.services.file_management_service import _is_pdf_cache_valid
+
+        mock_stream = MagicMock()
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_range', return_value=mock_stream):
+            assert _is_pdf_cache_valid("preview/converted/doc_abc12345.pdf") is True
+            mock_stream.close.assert_called_once()
+
+    def test_still_returns_true_when_close_fails(self):
+        """close() failures should be logged and not change validity result."""
+        from backend.services.file_management_service import _is_pdf_cache_valid
+
+        mock_stream = MagicMock()
+        mock_stream.close.side_effect = RuntimeError("close failed")
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_range', return_value=mock_stream), \
+             patch('backend.services.file_management_service.logger') as mock_logger:
+            assert _is_pdf_cache_valid("preview/converted/doc_abc12345.pdf") is True
+            mock_stream.close.assert_called_once()
+            mock_logger.warning.assert_called()
+
+    def test_returns_true_when_close_attribute_is_not_callable(self):
+        """Non-callable close attributes should be ignored and still count as valid cache."""
+        from backend.services.file_management_service import _is_pdf_cache_valid
+
+        mock_stream = types.SimpleNamespace(close="not-callable")
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_range', return_value=mock_stream):
+            assert _is_pdf_cache_valid("preview/converted/doc_abc12345.pdf") is True
+
+    def test_returns_false_when_file_not_exist(self):
+        """Returns False immediately when the cached file does not exist."""
+        from backend.services.file_management_service import _is_pdf_cache_valid
+
+        with patch('backend.services.file_management_service.file_exists', return_value=False):
+            assert _is_pdf_cache_valid("preview/converted/doc_abc12345.pdf") is False
+
+    def test_deletes_and_returns_false_when_cache_corrupted(self):
+        """Deletes corrupted cache and returns False when range read returns None."""
+        from backend.services.file_management_service import _is_pdf_cache_valid
+
+        with patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.get_file_range', return_value=None), \
+             patch('backend.services.file_management_service.delete_file') as mock_delete:
+            assert _is_pdf_cache_valid("preview/converted/doc_abc12345.pdf") is False
+            mock_delete.assert_called_once_with("preview/converted/doc_abc12345.pdf")
+
+
+class TestConvertOfficeToCachedPdf:
+    """Unit tests for _convert_office_to_cached_pdf helper."""
+
+    @pytest.mark.asyncio
+    async def test_skips_conversion_on_double_check_cache_hit(self):
+        """If another coroutine completes conversion while waiting for the lock, returns immediately."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=True):
+            result = await _convert_office_to_cached_pdf(
+                "docs/report.docx",
+                "preview/converted/docs/report_deadbeef.pdf",
+                "preview/converting/docs/report_deadbeef.pdf.tmp",
+            )
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_full_conversion_success(self):
+        """Happy path: calls data-process, copies result, deletes temp, returns None."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = ""
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mock_http_ctx = MagicMock()
+        mock_http_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('httpx.AsyncClient', return_value=mock_http_ctx), \
+             patch('backend.services.file_management_service.copy_file',
+                   return_value={'success': True}), \
+             patch('backend.services.file_management_service.delete_file') as mock_delete, \
+             patch('backend.services.file_management_service.file_exists', return_value=False):
+
+            result = await _convert_office_to_cached_pdf(
+                "docs/report.docx",
+                "preview/converted/docs/report_deadbeef.pdf",
+                "preview/converting/docs/report_deadbeef.pdf.tmp",
+            )
+
+        assert result is None
+        mock_client.post.assert_called_once()
+        called_url = mock_client.post.call_args[0][0]
+        assert "convert_to_pdf" in called_url
+        mock_delete.assert_called_with("preview/converting/docs/report_deadbeef.pdf.tmp")
+
+    @pytest.mark.asyncio
+    async def test_http_error_re_raises_exception(self):
+        """Non-200 HTTP response from data-process raises a sanitized OfficeConversionException."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+        from consts.exceptions import OfficeConversionException
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+        mock_response.text = "Service Unavailable"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mock_http_ctx = MagicMock()
+        mock_http_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('httpx.AsyncClient', return_value=mock_http_ctx), \
+             patch('backend.services.file_management_service.file_exists', return_value=False), \
+             patch('backend.services.file_management_service.delete_file'):
+
+            with pytest.raises(OfficeConversionException) as exc_info:
+                await _convert_office_to_cached_pdf(
+                    "docs/report.docx",
+                    "preview/converted/docs/report_deadbeef.pdf",
+                    "preview/converting/docs/report_deadbeef.pdf.tmp",
+                )
+
+        assert "Office file conversion failed" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_copy_failure_re_raises_and_cleans_up_temp(self):
+        """copy_file failure raises a sanitized OfficeConversionException and cleans up temp file."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+        from consts.exceptions import OfficeConversionException
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = ""
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mock_http_ctx = MagicMock()
+        mock_http_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('httpx.AsyncClient', return_value=mock_http_ctx), \
+             patch('backend.services.file_management_service.copy_file',
+                   return_value={'success': False, 'error': 'bucket full'}), \
+             patch('backend.services.file_management_service.file_exists', return_value=True), \
+             patch('backend.services.file_management_service.delete_file') as mock_delete:
+
+            with pytest.raises(OfficeConversionException) as exc_info:
+                await _convert_office_to_cached_pdf(
+                    "docs/report.docx",
+                    "preview/converted/docs/report_deadbeef.pdf",
+                    "preview/converting/docs/report_deadbeef.pdf.tmp",
+                )
+
+        assert "Office file conversion failed" in str(exc_info.value)
+        mock_delete.assert_called_with("preview/converting/docs/report_deadbeef.pdf.tmp")
+
+    @pytest.mark.asyncio
+    async def test_office_conversion_exception_passthrough(self):
+        """Existing OfficeConversionException should be re-raised without wrapping."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+        from consts.exceptions import OfficeConversionException
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=OfficeConversionException("upstream conversion failed"))
+
+        mock_http_ctx = MagicMock()
+        mock_http_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('httpx.AsyncClient', return_value=mock_http_ctx), \
+             patch('backend.services.file_management_service.file_exists', return_value=False), \
+             patch('backend.services.file_management_service.delete_file'):
+
+            with pytest.raises(OfficeConversionException) as exc_info:
+                await _convert_office_to_cached_pdf(
+                    "docs/report.docx",
+                    "preview/converted/docs/report_deadbeef.pdf",
+                    "preview/converting/docs/report_deadbeef.pdf.tmp",
+                )
+
+        assert "upstream conversion failed" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_non_office_exception_is_wrapped(self):
+        """Unexpected exceptions should be wrapped as OfficeConversionException with cause."""
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+        from consts.exceptions import OfficeConversionException
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=RuntimeError("network broken"))
+
+        mock_http_ctx = MagicMock()
+        mock_http_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=False), \
+             patch('httpx.AsyncClient', return_value=mock_http_ctx), \
+             patch('backend.services.file_management_service.file_exists', return_value=False), \
+             patch('backend.services.file_management_service.delete_file'):
+
+            with pytest.raises(OfficeConversionException) as exc_info:
+                await _convert_office_to_cached_pdf(
+                    "docs/report.docx",
+                    "preview/converted/docs/report_deadbeef.pdf",
+                    "preview/converting/docs/report_deadbeef.pdf.tmp",
+                )
+
+        assert "Office file conversion failed" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+    @pytest.mark.asyncio
+    async def test_reuses_existing_lock_for_same_object(self):
+        """If a lock for object_name already exists, it is reused."""
+        import asyncio as _asyncio
+        import backend.services.file_management_service as _svc
+        from backend.services.file_management_service import _convert_office_to_cached_pdf
+
+        existing_lock = _asyncio.Lock()
+        _svc._conversion_locks["docs/existing.docx"] = existing_lock
+
+        try:
+            with patch('backend.services.file_management_service._is_pdf_cache_valid', return_value=True):
+                result = await _convert_office_to_cached_pdf(
+                    "docs/existing.docx",
+                    "preview/converted/docs/existing_aabbccdd.pdf",
+                    "preview/converting/docs/existing_aabbccdd.pdf.tmp",
+                )
+        finally:
+            _svc._conversion_locks.pop("docs/existing.docx", None)
+
+        assert result is None

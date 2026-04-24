@@ -32,19 +32,25 @@ import {
   CheckCircle,
   CircleX,
   AlertCircle,
+  Import,
 } from "lucide-react";
 import { UploadFile } from "antd/es/upload/interface";
 
 import { McpServer, McpTool, McpContainer } from "@/types/agentConfig";
 import { useMcpConfig } from "@/hooks/useMcpConfig";
+import { useConfirmModal } from "@/hooks/useConfirmModal";
 import McpToolListModal from "@/components/mcp/McpToolListModal";
 import McpEditServerModal from "@/components/mcp/McpEditServerModal";
 import McpContainerLogsModal from "@/components/mcp/McpContainerLogsModal";
+import { API_ENDPOINTS } from "@/services/api";
+import { getAuthHeaders } from "@/lib/auth";
+import log from "@/lib/logger";
 
 const { Text, Title } = Typography;
 
 export default function McpList({ tenantId }: { tenantId: string | null }) {
   const { t } = useTranslation("common");
+  const { confirm } = useConfirmModal();
   const { message } = App.useApp();
 
   // Use shared hook for MCP config logic
@@ -66,6 +72,7 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
     handleUploadImage,
     handleDeleteContainer,
     handleViewLogs,
+    handleGetMcpRecord,
   } = useMcpConfig({ enabled: true, tenantId });
 
   // Add Modal State
@@ -73,6 +80,7 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
   const [addingServer, setAddingServer] = useState(false);
   const [newServerName, setNewServerName] = useState("");
   const [newServerUrl, setNewServerUrl] = useState("");
+  const [newServerAuthorizationToken, setNewServerAuthorizationToken] = useState("");
 
   // Tools Modal State
   const [toolsModalVisible, setToolsModalVisible] = useState(false);
@@ -84,25 +92,36 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
   const [editServerModalVisible, setEditServerModalVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServer | null>(null);
   const [updatingServer, setUpdatingServer] = useState(false);
+  const [loadingMcpRecord, setLoadingMcpRecord] = useState(false);
 
   // Container Add/Logs State
   const [addingContainer, setAddingContainer] = useState(false);
   const [containerConfigJson, setContainerConfigJson] = useState("");
   const [containerPort, setContainerPort] = useState<number | undefined>(undefined);
   const [logsModalVisible, setLogsModalVisible] = useState(false);
-  const [currentContainerLogs, setCurrentContainerLogs] = useState("");
   const [currentContainerId, setCurrentContainerId] = useState("");
-  const [loadingLogs, setLoadingLogs] = useState(false);
 
   // Upload State
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadFileList, setUploadFileList] = useState<UploadFile[]>([]);
   const [uploadPort, setUploadPort] = useState<number | undefined>(undefined);
   const [uploadServiceName, setUploadServiceName] = useState("");
+  const [uploadAuthorizationToken, setUploadAuthorizationToken] = useState("");
+
+  // OpenAPI to MCP State
+  const [openApiJson, setOpenApiJson] = useState("");
+  const [importingOpenApi, setImportingOpenApi] = useState(false);
+  const [outerApiTools, setOuterApiTools] = useState<any[]>([]);
+  const [loadingOuterApiTools, setLoadingOuterApiTools] = useState(false);
 
   const actionsLocked = updatingTools || addingContainer || uploadingImage;
 
-  // Data loading is handled by React Query (enabled: true)
+  // Load outer API tools on mount
+  useEffect(() => {
+    if (tenantId) {
+      loadOuterApiTools();
+    }
+  }, [tenantId]);
 
   // Handlers (Add Server)
   const onAddServer = async () => {
@@ -125,10 +144,15 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
     }
 
     setAddingServer(true);
-    const result = await handleAddServer(newServerUrl.trim(), serverName);
+    const result = await handleAddServer(
+      newServerUrl.trim(),
+      serverName,
+      newServerAuthorizationToken.trim() || null
+    );
     if (result.success) {
       setNewServerName("");
       setNewServerUrl("");
+      setNewServerAuthorizationToken("");
       setAddModalVisible(false);
       message.success(result.messageKey ? t(result.messageKey) : t("mcpService.message.addServerSuccess"));
     } else {
@@ -199,12 +223,29 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
   };
 
   // Handlers (Edit Server)
-  const onEditServer = (server: McpServer) => {
+  const onEditServer = async (server: McpServer) => {
     setEditingServer(server);
     setEditServerModalVisible(true);
+    setLoadingMcpRecord(true);
+
+    // If mcp_id is available, fetch the latest record data including authorization_token
+    if (server.mcp_id) {
+      const result = await handleGetMcpRecord(server.mcp_id);
+      if (result.success && result.data) {
+        setEditingServer({
+          ...server,
+          service_name: result.data.mcp_name,
+          mcp_url: result.data.mcp_server,
+          authorization_token: result.data.authorization_token,
+        });
+      } else {
+        message.error(result.messageKey ? t(result.messageKey) : (result.message || t("mcpConfig.message.getMcpRecordFailed")));
+      }
+    }
+    setLoadingMcpRecord(false);
   };
 
-  const onSaveEditedServer = async (name: string, url: string) => {
+  const onSaveEditedServer = async (name: string, url: string, authorizationToken?: string | null) => {
     if (!editingServer) return;
     if (!name.trim() || !url.trim()) {
       message.error(t("mcpConfig.message.nameAndUrlRequired"));
@@ -225,7 +266,8 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
       editingServer.service_name,
       editingServer.mcp_url,
       name.trim(),
-      url.trim()
+      url.trim(),
+      authorizationToken
     );
     if (result.success) {
       setEditServerModalVisible(false);
@@ -292,11 +334,17 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
     }
 
     setUploadingImage(true);
-    const result = await handleUploadImage(file, uploadPort, uploadServiceName.trim() || undefined);
+    const result = await handleUploadImage(
+      file,
+      uploadPort,
+      uploadServiceName.trim() || undefined,
+      uploadAuthorizationToken.trim() || undefined
+    );
     if (result.success) {
       setUploadFileList([]);
       setUploadPort(undefined);
       setUploadServiceName("");
+      setUploadAuthorizationToken("");
       setAddModalVisible(false);
       message.success(result.messageKey ? t(result.messageKey) : t("mcpService.message.uploadImageSuccess"));
     } else {
@@ -316,18 +364,104 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
 
   const onViewLogs = async (containerId: string) => {
     setCurrentContainerId(containerId);
-    setLoadingLogs(true);
     setLogsModalVisible(true);
-    setCurrentContainerLogs("");
+  };
 
-    const result = await handleViewLogs(containerId, 500);
-    if (result.success) {
-      setCurrentContainerLogs(result.data);
-    } else {
-      message.error(result.messageKey ? t(result.messageKey) : t("mcpConfig.message.getContainerLogsFailed"));
-      setCurrentContainerLogs(t("mcpConfig.message.getContainerLogsFailed"));
+  // OpenAPI to MCP Handlers
+  const loadOuterApiTools = async () => {
+    setLoadingOuterApiTools(true);
+    try {
+      const response = await fetch(API_ENDPOINTS.tool.outerApiTools, {
+        headers: getAuthHeaders(),
+      });
+      const result = await response.json();
+      if (result.data) {
+        setOuterApiTools(result.data);
+      } else {
+        message.error(t("mcpConfig.openApiToMcp.message.loadToolsFailed"));
+      }
+    } catch (error) {
+      log.error("Failed to load outer API tools:", error);
+      message.error(t("mcpConfig.openApiToMcp.message.loadToolsFailed"));
     }
-    setLoadingLogs(false);
+    setLoadingOuterApiTools(false);
+  };
+
+  const onImportOpenApi = async () => {
+    if (!openApiJson.trim()) {
+      message.error(t("mcpConfig.openApiToMcp.jsonPlaceholder"));
+      return;
+    }
+
+    let parsedJson;
+    try {
+      parsedJson = JSON.parse(openApiJson);
+    } catch {
+      message.error(t("mcpConfig.openApiToMcp.message.invalidJson"));
+      return;
+    }
+
+    setImportingOpenApi(true);
+    try {
+      const response = await fetch(API_ENDPOINTS.tool.importOpenapi, {
+        method: "POST",
+        headers: {
+          ...getAuthHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(parsedJson),
+      });
+
+      if (response.ok) {
+        message.success(t("mcpConfig.openApiToMcp.message.importSuccess"));
+        setOpenApiJson("");
+        await loadOuterApiTools();
+      } else {
+        const errorData = await response.json();
+        message.error(
+          errorData.detail || t("mcpConfig.openApiToMcp.message.importFailed")
+        );
+      }
+    } catch (error) {
+      log.error("Failed to import OpenAPI:", error);
+      message.error(t("mcpConfig.openApiToMcp.message.importFailed"));
+    }
+    setImportingOpenApi(false);
+  };
+
+  const onDeleteOuterApiTool = (tool: any) => {
+    confirm({
+      title: t("mcpConfig.delete.confirmTitle"),
+      content: t("mcpConfig.delete.confirmContent", {
+        name: tool.name,
+      }),
+      okText: t("common.delete", "Delete"),
+      onOk: async () => {
+        try {
+          const response = await fetch(
+            API_ENDPOINTS.tool.deleteOuterApiTool(tool.id),
+            {
+              method: "DELETE",
+              headers: getAuthHeaders(),
+            }
+          );
+
+          if (response.ok) {
+            message.success(
+              t("mcpConfig.openApiToMcp.message.deleteSuccess")
+            );
+            await loadOuterApiTools();
+          } else {
+            message.error(
+              t("mcpConfig.openApiToMcp.message.deleteFailed")
+            );
+          }
+        } catch (error) {
+          log.error("Failed to delete outer API tool:", error);
+          message.error(t("mcpConfig.openApiToMcp.message.deleteFailed"));
+        }
+      },
+    });
   };
 
   // Columns for Server Table
@@ -519,6 +653,50 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
     },
   ];
 
+  // Columns for Outer API Tools Table
+  const outerApiToolsColumns = [
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.name"),
+      dataIndex: "name",
+      key: "name",
+      width: "35%",
+      ellipsis: true,
+    },
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.description"),
+      dataIndex: "description",
+      key: "description",
+      width: "45%",
+      ellipsis: true,
+    },
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.action"),
+      key: "action",
+      width: "20%",
+      render: (_: any, record: any) => (
+        <div className="flex items-center space-x-2">
+          <Popconfirm
+            title={t("mcpConfig.delete.confirmTitle")}
+            description={t("mcpConfig.delete.confirmContent", { name: record.name })}
+            onConfirm={() => onDeleteOuterApiTool(record)}
+            okText={t("common.confirm")}
+            cancelText={t("common.cancel")}
+          >
+            <Tooltip title={t("mcpConfig.serverList.button.delete")}>
+              <Button
+                type="text"
+                danger
+                icon={<Trash2 className="h-4 w-4" />}
+                size="small"
+                disabled={actionsLocked}
+              />
+            </Tooltip>
+          </Popconfirm>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <div className="flex justify-between items-center mb-4 flex-shrink-0">
@@ -556,6 +734,20 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
             scroll={{ x: true }}
           />
         </div>
+
+        <div className="min-w-0">
+          <Title level={5} style={{ marginBottom: 12 }}>{t("mcpConfig.openApiToMcp.toolList.title")}</Title>
+          <Table
+            columns={outerApiToolsColumns}
+            dataSource={outerApiTools}
+            rowKey="id"
+            loading={loadingOuterApiTools}
+            size="small"
+            pagination={{ pageSize: 5 }}
+            locale={{ emptyText: t("mcpConfig.openApiToMcp.toolList.empty") }}
+            scroll={{ x: true }}
+          />
+        </div>
       </div>
 
       {/* Add Modal */}
@@ -580,32 +772,45 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
               ),
               children: (
                 <Card size="small" className="mt-2">
-                  <div className="flex items-center gap-2 w-full">
-                    <Input
-                      placeholder={t("mcpConfig.addServer.namePlaceholder")}
-                      value={newServerName}
-                      onChange={(e) => setNewServerName(e.target.value)}
-                      maxLength={20}
-                      disabled={actionsLocked || addingServer}
-                      style={{ flex: 1 }}
-                    />
-                    <Input
-                      placeholder={t("mcpConfig.addServer.urlPlaceholder")}
-                      value={newServerUrl}
-                      onChange={(e) => setNewServerUrl(e.target.value)}
-                      disabled={actionsLocked || addingServer}
-                      style={{ flex: 2 }}
-                    />
-                    <Button
-                      type="primary"
-                      onClick={onAddServer}
-                      loading={addingServer || updatingTools}
-                      disabled={actionsLocked}
-                      icon={addingServer || updatingTools ? <LoaderCircle className="animate-spin size-4" /> : <Plus className="size-4" />}
-                    >
-                      {t("mcpConfig.addServer.button.add")}
-                    </Button>
-                  </div>
+                  <Space direction="vertical" className="w-full" size="small">
+                    <div className="flex items-center gap-2 w-full">
+                      <Input
+                        placeholder={t("mcpConfig.addServer.namePlaceholder")}
+                        value={newServerName}
+                        onChange={(e) => setNewServerName(e.target.value)}
+                        maxLength={20}
+                        disabled={actionsLocked || addingServer}
+                        style={{ flex: 0.8 }}
+                      />
+                      <Input
+                        placeholder={t("mcpConfig.addServer.urlPlaceholder")}
+                        value={newServerUrl}
+                        onChange={(e) => setNewServerUrl(e.target.value)}
+                        disabled={actionsLocked || addingServer}
+                        style={{ flex: 3 }}
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 w-full">
+                      <Input.Password
+                        placeholder={t("mcpConfig.editServer.authorizationTokenPlaceholder")}
+                        value={newServerAuthorizationToken}
+                        onChange={(e) => setNewServerAuthorizationToken(e.target.value)}
+                        disabled={actionsLocked || addingServer}
+                        className="flex-1"
+                      />
+                      <Button
+                        type="primary"
+                        onClick={onAddServer}
+                        loading={addingServer || updatingTools}
+                        disabled={actionsLocked}
+                        icon={addingServer || updatingTools ? <LoaderCircle className="animate-spin size-4" /> : <Plus className="size-4" />}
+                      >
+                        {updatingTools
+                          ? t("mcpConfig.addServer.button.updating")
+                          : t("mcpConfig.addServer.button.add")}
+                      </Button>
+                    </div>
+                  </Space>
                 </Card>
               ),
             },
@@ -702,6 +907,15 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
                         className="flex-1"
                         disabled={actionsLocked}
                       />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Input.Password
+                        placeholder={t("mcpConfig.editServer.authorizationTokenPlaceholder")}
+                        value={uploadAuthorizationToken}
+                        onChange={(e) => setUploadAuthorizationToken(e.target.value)}
+                        className="flex-1"
+                        disabled={actionsLocked}
+                      />
                       <Button
                         type="primary"
                         onClick={onUploadImage}
@@ -709,13 +923,51 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
                         disabled={actionsLocked}
                         icon={uploadingImage || updatingTools ? <LoaderCircle className="animate-spin size-4" /> : <Plus className="size-4" />}
                       >
-                         {t("mcpConfig.addContainer.button.add")}
+                        {updatingTools
+                          ? t("mcpConfig.addContainer.button.updating")
+                          : t("mcpConfig.addContainer.button.add")}
                       </Button>
                     </div>
                   </Space>
                 </Card>
               ),
             }] : []),
+            {
+              key: "openapi",
+              label: (
+                <span className="flex items-center gap-2">
+                  <Import size={16} />
+                  {t("mcpConfig.openApiToMcp.title")}
+                </span>
+              ),
+              children: (
+                <Card size="small" className="mt-2">
+                  <Space direction="vertical" className="w-full" size="middle">
+                    <Input.TextArea
+                      placeholder={t("mcpConfig.openApiToMcp.jsonPlaceholder")}
+                      value={openApiJson}
+                      onChange={(e) => setOpenApiJson(e.target.value)}
+                      rows={6}
+                      disabled={actionsLocked || importingOpenApi}
+                      style={{ fontFamily: "monospace", fontSize: 12 }}
+                    />
+                    <div className="flex justify-end">
+                      <Button
+                        type="primary"
+                        onClick={onImportOpenApi}
+                        loading={importingOpenApi || updatingTools}
+                        disabled={actionsLocked}
+                        icon={importingOpenApi || updatingTools ? <LoaderCircle className="animate-spin size-4" /> : <Plus className="size-4" />}
+                      >
+                        {updatingTools
+                          ? t("mcpConfig.openApiToMcp.button.adding")
+                          : t("mcpConfig.openApiToMcp.button.add")}
+                      </Button>
+                    </div>
+                  </Space>
+                </Card>
+              ),
+            },
           ]}
         />
       </Modal>
@@ -732,20 +984,24 @@ export default function McpList({ tenantId }: { tenantId: string | null }) {
       {/* Edit Server Modal */}
       <McpEditServerModal
         open={editServerModalVisible}
-        onCancel={() => setEditServerModalVisible(false)}
+        onCancel={() => {
+          setEditServerModalVisible(false);
+          setEditingServer(null);
+        }}
         onSave={onSaveEditedServer}
         initialName={editingServer?.service_name || ""}
         initialUrl={editingServer?.mcp_url || ""}
-        loading={updatingServer}
+        initialAuthorizationToken={editingServer?.authorization_token || null}
+        loading={updatingServer || loadingMcpRecord}
       />
 
       {/* Logs Modal */}
       <McpContainerLogsModal
         open={logsModalVisible}
         onCancel={() => setLogsModalVisible(false)}
-        loading={loadingLogs}
-        logs={currentContainerLogs}
         containerId={currentContainerId}
+        tenantId={tenantId}
+        tail={500}
       />
     </div>
   );

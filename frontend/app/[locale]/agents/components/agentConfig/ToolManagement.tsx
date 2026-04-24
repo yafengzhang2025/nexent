@@ -4,14 +4,15 @@ import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import ToolConfigModal from "./tool/ToolConfigModal";
 import { ToolGroup, Tool, ToolParam } from "@/types/agentConfig";
-import { Tabs, Collapse, message } from "antd";
+import { Tabs, Collapse, message, Tooltip } from "antd";
 import { useAgentConfigStore } from "@/stores/agentConfigStore";
 import { useToolList } from "@/hooks/agent/useToolList";
 import { usePrefetchKnowledgeBases } from "@/hooks/useKnowledgeBaseSelector";
-import { updateToolConfig } from "@/services/agentConfigService";
+import { useConfig } from "@/hooks/useConfig";
 import { useQueryClient } from "@tanstack/react-query";
+import { useConfirmModal } from "@/hooks/useConfirmModal";
 
-import { Settings } from "lucide-react";
+import { Settings, AlertTriangle } from "lucide-react";
 
 interface ToolManagementProps {
   toolGroups: ToolGroup[];
@@ -24,15 +25,43 @@ const TOOLS_REQUIRING_KB_SELECTION = [
   "knowledge_base_search",
   "dify_search",
   "datamate_search",
+  "idata_search",
+];
+
+// Tool types that require Embedding model
+const TOOLS_REQUIRING_EMBEDDING = [
+  "knowledge_base_search",
+];
+
+// Tool types that require VLM model
+const TOOLS_REQUIRING_VLM = [
+  "analyze_image",
 ];
 
 function getToolKbType(
   toolName: string
-): "knowledge_base_search" | "dify_search" | "datamate_search" | null {
+): "knowledge_base_search" | "dify_search" | "datamate_search" | "idata_search" | null {
   if (!TOOLS_REQUIRING_KB_SELECTION.includes(toolName)) return null;
   if (toolName === "dify_search") return "dify_search";
   if (toolName === "datamate_search") return "datamate_search";
+  if (toolName === "idata_search") return "idata_search";
   return "knowledge_base_search";
+}
+
+/**
+ * Check if a tool requires VLM model but VLM is not available
+ */
+function isToolDisabledDueToVlm(toolName: string, vlmAvailable: boolean): boolean {
+  if (!TOOLS_REQUIRING_VLM.includes(toolName)) return false;
+  return !vlmAvailable;
+}
+
+/**
+ * Check if a tool requires Embedding model but Embedding is not available
+ */
+function isToolDisabledDueToEmbedding(toolName: string, embeddingAvailable: boolean): boolean {
+  if (!TOOLS_REQUIRING_EMBEDDING.includes(toolName)) return false;
+  return !embeddingAvailable;
 }
 
 /**
@@ -46,8 +75,17 @@ export default function ToolManagement({
 }: ToolManagementProps) {
   const { t } = useTranslation("common");
   const queryClient = useQueryClient();
+  const { confirm } = useConfirmModal();
 
-  const editable = currentAgentId || isCreatingMode;
+  // Get current agent permission from store
+  const currentAgentPermission = useAgentConfigStore(
+    (state) => state.currentAgentPermission
+  );
+
+  // Check if current agent is read-only (only when agent is selected and permission is READ_ONLY)
+  const isReadOnly = !isCreatingMode && currentAgentId !== undefined && currentAgentPermission === "READ_ONLY";
+
+  const editable = (currentAgentId || isCreatingMode) && !isReadOnly;
 
   // Get state from store
   const originalSelectedTools = useAgentConfigStore(
@@ -61,6 +99,8 @@ export default function ToolManagement({
 
   // Use tool list hook for data management
   const { availableTools } = useToolList();
+
+  const { isVlmAvailable, isEmbeddingAvailable } = useConfig();
 
   // Prefetch knowledge bases for KB tools
   const { prefetchKnowledgeBases } = usePrefetchKnowledgeBases();
@@ -131,9 +171,7 @@ export default function ToolManagement({
       (t) => parseInt(t.id) === parseInt(tool.id)
     );
     // Merge configured tool with original tool to ensure all fields are present
-    const toolToUse = configuredTool
-      ? { ...tool, ...configuredTool, initParams: configuredTool.initParams }
-      : tool;
+    const toolToUse = configuredTool ? { ...tool, ...configuredTool, initParams: configuredTool.initParams } : tool;
 
     // Get merged parameters (for editing mode, merge with instance params)
     const mergedParams = await mergeToolParamsWithInstance(
@@ -160,96 +198,96 @@ export default function ToolManagement({
     }
 
     // Get latest tools directly from store to avoid stale closure issues
-    const currentSelectdTools =
-      useAgentConfigStore.getState().editedAgent.tools;
+    const currentSelectdTools = useAgentConfigStore.getState().editedAgent.tools;
     const isCurrentlySelected = currentSelectdTools.some(
       (t) => parseInt(t.id) === numericId
     );
 
     if (isCurrentlySelected) {
       // If already selected, deselect it
-      const newSelectedTools = currentSelectdTools.filter(
-        (t) => parseInt(t.id) !== numericId
-      );
+      const newSelectedTools = currentSelectdTools.filter((t) => parseInt(t.id) !== numericId);
       updateTools(newSelectedTools);
     } else {
-      // If not selected, determine tool params and check if modal is needed
-      const configuredTool = currentSelectdTools.find(
-        (t) => parseInt(t.id) === numericId
-      );
-      // Merge configured tool with original tool to ensure all fields are present
-      const toolToUse = configuredTool
-        ? { ...tool, ...configuredTool, initParams: configuredTool.initParams }
-        : tool;
+      // Helper function to proceed with tool selection after duplicate check
+      async function proceedWithToolSelection() {
+        // Get latest tools again to ensure we have the most up-to-date list
+        const currentSelectdTools =
+          useAgentConfigStore.getState().editedAgent.tools;
 
-      // Get merged parameters (for editing mode, merge with instance params)
-      const mergedParams = await mergeToolParamsWithInstance(
-        tool,
-        toolToUse,
-        isCreatingMode ? undefined : currentAgentId!
-      );
+        // Determine tool params and check if modal is needed
+        const configuredTool = currentSelectdTools.find(
+          (t) => parseInt(t.id) === numericId
+        );
+        // Merge configured tool with original tool to ensure all fields are present
+        const toolToUse = configuredTool
+          ? { ...tool, ...configuredTool, initParams: configuredTool.initParams }
+          : tool;
 
-      // Check if there are empty required params
-      const hasEmptyRequiredParams = mergedParams.some(
-        (param: ToolParam) =>
-          param.required &&
-          (param.value === undefined ||
-            param.value === "" ||
-            param.value === null)
-      );
+        // Get merged parameters (for editing mode, merge with instance params)
+        const mergedParams = await mergeToolParamsWithInstance(
+          tool,
+          toolToUse,
+          isCreatingMode ? undefined : currentAgentId!
+        );
 
-      if (hasEmptyRequiredParams) {
-        // Need to configure, open modal
-        setSelectedTool(toolToUse);
-        setToolParams(mergedParams);
-        setIsToolModalOpen(true);
-      } else {
-        // No required params missing, add directly
-        const newSelectedTools = [
-          ...currentSelectdTools,
-          {
-            ...toolToUse,
-            initParams: mergedParams,
-          },
-        ];
-        updateTools(newSelectedTools);
+        // Check if there are empty required params
+        const hasEmptyRequiredParams = mergedParams.some(
+          (param: ToolParam) =>
+            param.required &&
+            (param.value === undefined ||
+              param.value === "" ||
+              param.value === null)
+        );
 
-        // In non-creating mode, immediately save tool config to backend
-        if (!isCreatingMode && currentAgentId) {
-          try {
-            // Convert params to backend format
-            const paramsObj = mergedParams.reduce(
-              (acc, param) => {
-                acc[param.name] = param.value;
-                return acc;
-              },
-              {} as Record<string, any>
-            );
-
-            const isEnabled = true; // New tool is enabled by default
-            const result = await updateToolConfig(
-              numericId,
-              currentAgentId,
-              paramsObj,
-              isEnabled
-            );
-
-            if (result.success) {
-              // Invalidate queries to refresh tool info
-              queryClient.invalidateQueries({
-                queryKey: ["toolInfo", numericId, currentAgentId],
-              });
-            } else {
-              message.error(
-                result.message || t("toolConfig.message.saveError")
-              );
-            }
-          } catch (error) {
-            console.error("Failed to save tool config:", error);
-            message.error(t("toolConfig.message.saveError"));
-          }
+        if (hasEmptyRequiredParams) {
+          // Need to configure, open modal
+          setSelectedTool(toolToUse);
+          setToolParams(mergedParams);
+          setIsToolModalOpen(true);
+        } else {
+          // No required params missing, add directly
+          const newSelectedTools = [
+            ...currentSelectdTools,
+            {
+              ...toolToUse,
+              initParams: mergedParams,
+            },
+          ];
+          updateTools(newSelectedTools);
         }
       }
+
+      // If not selected, check for duplicate tool names first
+      const duplicateTool = currentSelectdTools.find(
+        (selectedTool) => selectedTool.name === tool.name
+      );
+
+      if (duplicateTool) {
+        // Show confirmation modal for duplicate tool name
+        return new Promise<void>((resolve) => {
+          confirm({
+            title: t("toolPool.duplicateToolName.title"),
+            content: t("toolPool.duplicateToolName.content", {
+              toolName: tool.name,
+            }),
+            okText: t("toolPool.duplicateToolName.confirm"),
+            cancelText: t("toolPool.duplicateToolName.cancel"),
+            danger: true,
+            onOk: async () => {
+              // User confirmed, proceed with tool selection
+              await proceedWithToolSelection();
+              resolve();
+            },
+            onCancel: () => {
+              // User cancelled, do nothing
+              resolve();
+            },
+          });
+        });
+      }
+
+      // No duplicate, proceed with normal tool selection
+      await proceedWithToolSelection();
     }
   };
 
@@ -324,26 +362,75 @@ export default function ToolManagement({
                           const isSelected = originalSelectedToolIdsSet.has(
                             tool.id
                           );
-                          return (
+                          const isDisabledDueToVlm = isToolDisabledDueToVlm(tool.name, isVlmAvailable);
+                          const isDisabledDueToEmbedding = isToolDisabledDueToEmbedding(tool.name, isEmbeddingAvailable);
+                          const isDisabled = isDisabledDueToVlm || isDisabledDueToEmbedding || isReadOnly;
+                          // Tooltip priority: permission > VLM > Embedding
+                          const tooltipTitle = isReadOnly
+                            ? t("agent.noEditPermission")
+                            : isDisabledDueToVlm
+                            ? t("toolPool.vlmDisabledTooltip")
+                            : isDisabledDueToEmbedding
+                            ? t("toolPool.embeddingDisabledTooltip")
+                            : undefined;
+                          const toolCard = (
                             <div
                               key={tool.id}
                               className={`border-2 rounded-md p-2 flex items-center justify-between transition-all duration-300 ease-in-out min-h-[52px] shadow-sm ${
                                 isSelected
                                   ? "bg-blue-100 border-blue-400 shadow-md"
                                   : "border-gray-200 hover:border-blue-300 hover:shadow-md"
-                              } ${editable ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                              } ${editable && !isDisabled ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                               onClick={
-                                editable
+                                editable && !isDisabled
                                   ? () => handleToolClick(tool.id)
                                   : undefined
                               }
                             >
-                              <span>{tool.name}</span>
+                              <div className="flex items-center gap-2">
+                                <span>{tool.name}</span>
+                                {isDisabledDueToVlm && (
+                                  <Tooltip
+                                    title={t("toolPool.vlmDisabledTooltip")}
+                                    color="#ffffff"
+                                    styles={{
+                                      root: {
+                                        backgroundColor: "#ffffff",
+                                        border: "1px solid #e5e7eb",
+                                        borderRadius: "6px",
+                                        boxShadow:
+                                          "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)",
+                                        maxWidth: "800px",
+                                      },
+                                    }}
+                                  >
+                                    <AlertTriangle size={14} className="text-orange-500 cursor-help flex-shrink-0" />
+                                  </Tooltip>
+                                )}
+                                {isDisabledDueToEmbedding && (
+                                  <Tooltip
+                                    title={t("toolPool.embeddingDisabledTooltip")}
+                                    color="#ffffff"
+                                    styles={{
+                                      root: {
+                                        backgroundColor: "#ffffff",
+                                        border: "1px solid #e5e7eb",
+                                        borderRadius: "6px",
+                                        boxShadow:
+                                          "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)",
+                                        maxWidth: "800px",
+                                      },
+                                    }}
+                                  >
+                                    <AlertTriangle size={14} className="text-orange-500 cursor-help flex-shrink-0" />
+                                  </Tooltip>
+                                )}
+                              </div>
                               <Settings
                                 size={16}
-                                className={`${editable ? "cursor-pointer text-gray-500 hover:text-gray-700" : "cursor-not-allowed text-gray-400"} transition-colors`}
+                                className={`${editable && !isDisabled ? "cursor-pointer text-gray-500 hover:text-gray-700" : "cursor-not-allowed text-gray-400"} transition-colors`}
                                 onClick={
-                                  editable
+                                  editable && !isDisabled
                                     ? (e) => {
                                         e.stopPropagation();
                                         handleToolSettingsClick(tool);
@@ -352,6 +439,13 @@ export default function ToolManagement({
                                 }
                               />
                             </div>
+                          );
+                          return tooltipTitle ? (
+                            <Tooltip key={tool.id} title={tooltipTitle}>
+                              {toolCard}
+                            </Tooltip>
+                          ) : (
+                            toolCard
                           );
                         })}
                       </div>
@@ -373,24 +467,73 @@ export default function ToolManagement({
             >
               {group.tools.map((tool) => {
                 const isSelected = originalSelectedToolIdsSet.has(tool.id);
-                return (
+                const isDisabledDueToVlm = isToolDisabledDueToVlm(tool.name, isVlmAvailable);
+                const isDisabledDueToEmbedding = isToolDisabledDueToEmbedding(tool.name, isEmbeddingAvailable);
+                const isDisabled = isDisabledDueToVlm || isDisabledDueToEmbedding || isReadOnly;
+                // Tooltip priority: permission > VLM > Embedding
+                const tooltipTitle = isReadOnly
+                  ? t("agent.noEditPermission")
+                  : isDisabledDueToVlm
+                  ? t("toolPool.vlmDisabledTooltip")
+                  : isDisabledDueToEmbedding
+                  ? t("toolPool.embeddingDisabledTooltip")
+                  : undefined;
+                const toolCard = (
                   <div
                     key={tool.id}
                     className={`border-2 rounded-md p-2 flex items-center justify-between transition-all duration-300 ease-in-out min-h-[52px] shadow-sm ${
-                      isSelected
-                        ? "bg-blue-100 border-blue-400 shadow-md"
-                        : "border-gray-200 hover:border-blue-300 hover:shadow-md"
-                    } ${editable ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                        isSelected
+                          ? "bg-blue-100 border-blue-400 shadow-md"
+                          : "border-gray-200 hover:border-blue-300 hover:shadow-md"
+                      } ${editable && !isDisabled ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                     onClick={
-                      editable ? () => handleToolClick(tool.id) : undefined
+                      editable && !isDisabled ? () => handleToolClick(tool.id) : undefined
                     }
                   >
-                    <span>{tool.name}</span>
+                    <div className="flex items-center gap-2">
+                      <span>{tool.name}</span>
+                      {isDisabledDueToVlm && (
+                        <Tooltip
+                          title={t("toolPool.vlmDisabledTooltip")}
+                          color="#ffffff"
+                          styles={{
+                            root: {
+                              backgroundColor: "#ffffff",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "6px",
+                              boxShadow:
+                                "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)",
+                              maxWidth: "800px",
+                            },
+                          }}
+                        >
+                          <AlertTriangle size={14} className="text-orange-500 cursor-help flex-shrink-0" />
+                        </Tooltip>
+                      )}
+                      {isDisabledDueToEmbedding && (
+                        <Tooltip
+                          title={t("toolPool.embeddingDisabledTooltip")}
+                          color="#ffffff"
+                          styles={{
+                            root: {
+                              backgroundColor: "#ffffff",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "6px",
+                              boxShadow:
+                                "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)",
+                              maxWidth: "800px",
+                            },
+                          }}
+                        >
+                          <AlertTriangle size={14} className="text-orange-500 cursor-help flex-shrink-0" />
+                        </Tooltip>
+                      )}
+                    </div>
                     <Settings
                       size={16}
-                      className={`${editable ? "cursor-pointer text-gray-500 hover:text-gray-700" : "cursor-not-allowed text-gray-400"} transition-colors`}
+                      className={`${editable && !isDisabled ? "cursor-pointer text-gray-500 hover:text-gray-700" : "cursor-not-allowed text-gray-400"} transition-colors`}
                       onClick={
-                        editable
+                        editable && !isDisabled
                           ? (e) => {
                               e.stopPropagation();
                               handleToolSettingsClick(tool);
@@ -399,6 +542,13 @@ export default function ToolManagement({
                       }
                     />
                   </div>
+                );
+                return tooltipTitle ? (
+                  <Tooltip key={tool.id} title={tooltipTitle}>
+                    {toolCard}
+                  </Tooltip>
+                ) : (
+                  toolCard
                 );
               })}
             </div>

@@ -30,9 +30,8 @@ class UserSignUpRequest(BaseModel):
     """User registration request model"""
     email: EmailStr
     password: str = Field(..., min_length=6)
-    is_admin: Optional[bool] = False
     invite_code: Optional[str] = None
-    with_new_invitation: Optional[bool] = False
+    auto_login: Optional[bool] = True  # Whether to return session after signup
 
 
 class UserSignInRequest(BaseModel):
@@ -116,6 +115,7 @@ class AppConfig(BaseModel):
     appName: str
     appDescription: str
     iconType: str
+    iconKey: Optional[str] = "search"
     customIconUrl: Optional[str] = None
     avatarUri: Optional[str] = None
     modelEngineEnabled: bool = False
@@ -131,7 +131,6 @@ class GlobalConfig(BaseModel):
 class AgentRequest(BaseModel):
     query: str
     conversation_id: Optional[int] = None
-    is_set: Optional[bool] = False
     history: Optional[List[Dict]] = None
     # Complete list of attachment information
     minio_files: Optional[List[Dict[str, Any]]] = None
@@ -255,7 +254,7 @@ class GeneratePromptRequest(BaseModel):
 
 class GenerateTitleRequest(BaseModel):
     conversation_id: int
-    history: List[Dict[str, str]]
+    question: str
 
 
 # used in agent/search agent/update for save agent info
@@ -277,8 +276,10 @@ class AgentInfoRequest(BaseModel):
     business_logic_model_name: Optional[str] = None
     business_logic_model_id: Optional[int] = None
     enabled_tool_ids: Optional[List[int]] = None
+    enabled_skill_ids: Optional[List[int]] = None
     related_agent_ids: Optional[List[int]] = None
     group_ids: Optional[List[int]] = None
+    ingroup_permission: Optional[str] = None
     version_no: int = 0
 
 
@@ -294,6 +295,18 @@ class ToolInstanceInfoRequest(BaseModel):
     version_no: int = 0
 
 
+class SkillInstanceInfoRequest(BaseModel):
+    """Request model for skill instance update.
+
+    Note: skill_description and skill_content are no longer accepted.
+    These fields are now retrieved from ag_skill_info_t table.
+    """
+    skill_id: int
+    agent_id: int
+    enabled: bool = True
+    version_no: int = 0
+
+
 class ToolInstanceSearchRequest(BaseModel):
     tool_id: int
     agent_id: int
@@ -303,11 +316,13 @@ class ToolSourceEnum(Enum):
     LOCAL = "local"
     MCP = "mcp"
     LANGCHAIN = "langchain"
+    BUILTIN = "builtin"
 
 
 class ToolInfo(BaseModel):
     name: str
     description: str
+    description_zh: Optional[str] = None
     params: List
     source: str
     inputs: str
@@ -491,6 +506,8 @@ class MCPUpdateRequest(BaseModel):
     current_mcp_url: str = Field(..., description="Current MCP server URL")
     new_service_name: str = Field(..., description="New MCP service name")
     new_mcp_url: str = Field(..., description="New MCP server URL")
+    new_authorization_token: Optional[str] = Field(
+        None, description="New authorization token for MCP server authentication (e.g., Bearer token)")
 
 
 # Tenant Management Data Models
@@ -507,12 +524,11 @@ class TenantUpdateRequest(BaseModel):
                              description="New tenant display name")
 
 
-class TenantResponse(BaseModel):
-    """Response model for tenant information"""
-    tenant_id: str = Field(..., description="Tenant identifier")
-    tenant_name: str = Field(..., description="Tenant display name")
-    default_group_id: Optional[int] = Field(
-        None, description="Default group ID for the tenant")
+# Pagination request model
+class PaginationRequest(BaseModel):
+    """Request model for pagination parameters"""
+    page: int = Field(1, ge=1, description="Page number")
+    page_size: int = Field(20, ge=1, le=100, description="Items per page")
 
 
 # Group Management Data Models
@@ -537,21 +553,27 @@ class GroupUpdateRequest(BaseModel):
 class GroupListRequest(BaseModel):
     """Request model for listing groups"""
     tenant_id: str = Field(..., description="Tenant ID to filter groups")
-    page: int = Field(1, ge=1, description="Page number for pagination")
-    page_size: int = Field(
-        20, ge=1, le=100, description="Number of items per page")
-    sort_by: Optional[str] = Field("created_at", description="Field to sort by")
-    sort_order: Optional[str] = Field("desc", description="Sort order (asc or desc)")
+    page: Optional[int] = Field(
+        None, ge=1, description="Page number for pagination. If not provided, returns all data")
+    page_size: Optional[int] = Field(
+        None, ge=1, le=100, description="Number of items per page. If not provided, returns all data")
+    sort_by: Optional[str] = Field(
+        "created_at", description="Field to sort by")
+    sort_order: Optional[str] = Field(
+        "desc", description="Sort order (asc or desc)")
 
 
 class UserListRequest(BaseModel):
     """Request model for listing users"""
     tenant_id: str = Field(..., description="Tenant ID to filter users")
-    page: int = Field(1, ge=1, description="Page number for pagination")
-    page_size: int = Field(
-        20, ge=1, le=100, description="Number of items per page")
-    sort_by: Optional[str] = Field("created_at", description="Field to sort by")
-    sort_order: Optional[str] = Field("desc", description="Sort order (asc or desc)")
+    page: Optional[int] = Field(
+        None, ge=1, description="Page number for pagination. If not provided, returns all data")
+    page_size: Optional[int] = Field(
+        None, ge=1, le=100, description="Number of items per page. If not provided, returns all data")
+    sort_by: Optional[str] = Field(
+        "created_at", description="Field to sort by")
+    sort_order: Optional[str] = Field(
+        "desc", description="Sort order (asc or desc)")
 
 
 class GroupUserRequest(BaseModel):
@@ -670,6 +692,7 @@ class ManageTenantModelCreateRequest(BaseModel):
     base_url: Optional[str] = Field('', description="Base URL for the model API")
     max_tokens: Optional[int] = Field(0, description="Maximum tokens for the model")
     display_name: Optional[str] = Field('', description="Display name for the model")
+    model_factory: Optional[str] = Field('OpenAI-API-Compatible', description="Model factory/provider name")
     expected_chunk_size: Optional[int] = Field(None, description="Expected chunk size for embedding models")
     maximum_chunk_size: Optional[int] = Field(None, description="Maximum chunk size for embedding models")
     chunk_batch: Optional[int] = Field(None, description="Batch size for chunking")
@@ -686,6 +709,7 @@ class ManageTenantModelUpdateRequest(BaseModel):
     base_url: Optional[str] = Field(None, description="Base URL for the model API")
     max_tokens: Optional[int] = Field(None, description="Maximum tokens for the model")
     display_name: Optional[str] = Field(None, description="New display name for the model")
+    model_factory: Optional[str] = Field(None, description="Model factory/provider name")
     expected_chunk_size: Optional[int] = Field(None, description="Expected chunk size for embedding models")
     maximum_chunk_size: Optional[int] = Field(None, description="Maximum chunk size for embedding models")
     chunk_batch: Optional[int] = Field(None, description="Batch size for chunking")
@@ -734,6 +758,7 @@ class VersionPublishRequest(BaseModel):
     """Request model for publishing a new version"""
     version_name: Optional[str] = Field(None, description="User-defined version name for display")
     release_note: Optional[str] = Field(None, description="Release notes / publish remarks")
+    publish_as_a2a: bool = Field(False, description="Whether to publish this agent as an A2A Server agent")
 
 
 class VersionListItemResponse(BaseModel):
@@ -780,6 +805,12 @@ class VersionRollbackRequest(BaseModel):
 class VersionStatusRequest(BaseModel):
     """Request model for updating version status"""
     status: str = Field(..., description="New status: DISABLED / ARCHIVED")
+
+
+class VersionUpdateRequest(BaseModel):
+    """Request model for updating version metadata (name and description)"""
+    version_name: Optional[str] = Field(None, description="User-defined version name for display")
+    release_note: Optional[str] = Field(None, description="Release notes / version description")
 
 
 class VersionCompareRequest(BaseModel):

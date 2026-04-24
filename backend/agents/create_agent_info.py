@@ -1,12 +1,12 @@
 import threading
 import logging
+from typing import List, Optional
 from urllib.parse import urljoin
 from datetime import datetime
 
 from jinja2 import Template, StrictUndefined
-from smolagents.utils import BASE_BUILTIN_MODULES
 from nexent.core.utils.observer import MessageObserver
-from nexent.core.agents.agent_model import AgentRunInfo, ModelConfig, AgentConfig, ToolConfig
+from nexent.core.agents.agent_model import AgentRunInfo, ModelConfig, AgentConfig, ToolConfig, ExternalA2AAgentConfig
 from nexent.memory.memory_service import search_memory_in_levels
 
 from services.file_management_service import get_llm_model
@@ -14,11 +14,15 @@ from services.vectordatabase_service import (
     ElasticSearchService,
     get_vector_db_core,
     get_embedding_model,
+    get_rerank_model,
 )
 from services.remote_mcp_service import get_remote_mcp_server_list
+
+from database.a2a_agent_db import PROTOCOL_JSONRPC
 from services.memory_config_service import build_memory_context
 from services.image_service import get_vlm_model
 from database.agent_db import search_agent_info_by_agent_id, query_sub_agents_id_list
+from database.agent_version_db import query_current_version_no
 from database.tool_db import search_tools_for_sub_agent
 from database.model_management_db import get_model_records, get_model_by_model_id
 from database.client import minio_client
@@ -26,9 +30,206 @@ from utils.model_name_utils import add_repo_to_name
 from utils.prompt_template_utils import get_agent_prompt_template
 from utils.config_utils import tenant_config_manager, get_model_name_from_config
 from consts.const import LOCAL_MCP_SERVER, MODEL_CONFIG_MAPPING, LANGUAGE, DATA_PROCESS_SERVICE
+import re
 
 logger = logging.getLogger("create_agent_info")
 logger.setLevel(logging.DEBUG)
+
+
+def _get_skills_for_template(
+    agent_id: int,
+    tenant_id: str,
+    version_no: int = 0
+) -> List[dict]:
+    """Get skills list for prompt template injection.
+
+    Args:
+        agent_id: Agent ID
+        tenant_id: Tenant ID
+        version_no: Version number
+
+    Returns:
+        List of skill dicts with name and description
+    """
+    try:
+        from services.skill_service import SkillService
+        skill_service = SkillService()
+        enabled_skills = skill_service.get_enabled_skills_for_agent(
+            agent_id=agent_id,
+            tenant_id=tenant_id,
+            version_no=version_no
+        )
+        return [
+            {"name": s.get("name", ""), "description": s.get("description", "")}
+            for s in enabled_skills
+        ]
+    except Exception as e:
+        logger.warning(f"Failed to get skills for template: {e}")
+        return []
+
+
+def _extract_url_from_card(raw_card: Optional[dict]) -> str:
+    """Extract http-json-rpc URL from Agent Card supportedInterfaces."""
+    if not raw_card:
+        return ""
+
+    supported_interfaces = raw_card.get("supportedInterfaces", [])
+    if not supported_interfaces:
+        return raw_card.get("url", "")
+
+    # Prefer http-json-rpc protocol
+    for iface in supported_interfaces:
+        protocol_binding = iface.get("protocolBinding", "").lower()
+        if protocol_binding in ("http-json-rpc", "jsonrpc", "httpjsonrpc"):
+            url = iface.get("url", "")
+            if url:
+                return url
+
+    # Fallback to first interface with a URL
+    for iface in supported_interfaces:
+        url = iface.get("url", "")
+        if url:
+            return url
+
+    return raw_card.get("url", "")
+
+
+def _build_external_agent_config(agent: dict, agent_url: str) -> ExternalA2AAgentConfig:
+    """Build an ExternalA2AAgentConfig from agent data."""
+    return ExternalA2AAgentConfig(
+        agent_id=str(agent.get("external_agent_id", "")),
+        name=agent.get("name", "Unknown"),
+        description=agent.get("description", "External A2A agent"),
+        url=agent_url,
+        api_key=None,
+        transport_type=agent.get("transport_type", "http-streaming"),
+        protocol_version=agent.get("protocol_version", "1.0"),
+        protocol_type=agent.get("protocol_type", PROTOCOL_JSONRPC),
+        timeout=300.0,
+        raw_card=agent.get("raw_card"),
+    )
+
+
+def _get_external_a2a_agents(
+    agent_id: int,
+    tenant_id: str,
+    version_no: int = 0
+) -> List[ExternalA2AAgentConfig]:
+    """Get external A2A agent configurations for an agent.
+
+    Args:
+        agent_id: Agent ID
+        tenant_id: Tenant ID
+        version_no: Version number
+
+    Returns:
+        List of ExternalA2AAgentConfig for external A2A sub-agents
+    """
+    logger.info(f"[_get_external_a2a_agents] START - agent_id={agent_id}, tenant_id={tenant_id}")
+    try:
+        from database import a2a_agent_db
+
+        external_agents = a2a_agent_db.query_external_sub_agents(
+            local_agent_id=agent_id,
+            tenant_id=tenant_id,
+            version_no=version_no,
+        )
+        logger.info(f"[_get_external_a2a_agents] DB query returned {len(external_agents)} agents")
+        logger.debug(f"[_get_external_a2a_agents] agent details: {external_agents}")
+
+        result = []
+        for agent in external_agents:
+            agent_url = agent.get("agent_url", "") or _extract_url_from_card(agent.get("raw_card"))
+            if not agent_url:
+                logger.warning(
+                    f"[_get_external_a2a_agents] Skipping agent '{agent.get('name')}' - no URL available"
+                )
+                continue
+
+            result.append(_build_external_agent_config(agent, agent_url))
+
+        logger.info(f"[_get_external_a2a_agents] returning {len(result)} ExternalA2AAgentConfig")
+        for i, config in enumerate(result):
+            logger.info(f"  [{i}] name={config.name}, description={config.description}")
+        return result
+    except Exception as e:
+        logger.error(f"[_get_external_a2a_agents] FAILED: {e}", exc_info=True)
+        return []
+
+
+def _get_skill_script_tools(
+    agent_id: int,
+    tenant_id: str,
+    version_no: int = 0
+) -> List[ToolConfig]:
+    """Get tool config for skill script execution and skill reading.
+
+    Args:
+        agent_id: Agent ID for filtering available skills in error messages.
+        tenant_id: Tenant ID for filtering available skills in error messages.
+        version_no: Version number for filtering available skills.
+
+    Returns:
+        List of ToolConfig for skill execution and reading tools
+    """
+    from consts.const import CONTAINER_SKILLS_PATH
+
+    skill_context = {
+        "agent_id": agent_id,
+        "tenant_id": tenant_id,
+        "version_no": version_no,
+    }
+
+    try:
+        return [
+            ToolConfig(
+                class_name="RunSkillScriptTool",
+                name="run_skill_script",
+                description="Execute a skill script with given parameters. Use this to run Python or shell scripts that are part of a skill.",
+                inputs='{"skill_name": "str", "script_path": "str", "params": "dict"}',
+                output_type="string",
+                params={"local_skills_dir": CONTAINER_SKILLS_PATH},
+                source="builtin",
+                usage="builtin",
+                metadata=skill_context,
+            ),
+            ToolConfig(
+                class_name="ReadSkillMdTool",
+                name="read_skill_md",
+                description="Read skill execution guide and optional additional files. Always reads SKILL.md first, then optionally reads additional files.",
+                inputs='{"skill_name": "str", "additional_files": "list[str]"}',
+                output_type="string",
+                params={"local_skills_dir": CONTAINER_SKILLS_PATH},
+                source="builtin",
+                usage="builtin",
+                metadata=skill_context,
+            ),
+            ToolConfig(
+                class_name="ReadSkillConfigTool",
+                name="read_skill_config",
+                description="Read the config.yaml file from a skill directory. Returns JSON containing configuration variables needed for skill workflows.",
+                inputs='{"skill_name": "str"}',
+                output_type="string",
+                params={"local_skills_dir": CONTAINER_SKILLS_PATH},
+                source="builtin",
+                usage="builtin",
+                metadata=skill_context,
+            ),
+            ToolConfig(
+                class_name="WriteSkillFileTool",
+                name="write_skill_file",
+                description="Write content to a file within a skill directory. Creates parent directories if they do not exist.",
+                inputs='{"skill_name": "str", "file_path": "str", "content": "str"}',
+                output_type="string",
+                params={"local_skills_dir": CONTAINER_SKILLS_PATH},
+                source="builtin",
+                usage="builtin",
+                metadata=skill_context,
+            )
+        ]
+    except Exception as e:
+        logger.warning(f"Failed to load skill script tool: {e}")
+        return []
 
 
 async def create_model_config_list(tenant_id):
@@ -75,15 +276,19 @@ async def create_agent_config(
     language: str = LANGUAGE["ZH"],
     last_user_query: str = None,
     allow_memory_search: bool = True,
+    version_no: int = 0,
 ):
     agent_info = search_agent_info_by_agent_id(
-        agent_id=agent_id, tenant_id=tenant_id)
+        agent_id=agent_id, tenant_id=tenant_id, version_no=version_no)
 
     # create sub agent
     sub_agent_id_list = query_sub_agents_id_list(
-        main_agent_id=agent_id, tenant_id=tenant_id)
+        main_agent_id=agent_id, tenant_id=tenant_id, version_no=version_no)
     managed_agents = []
     for sub_agent_id in sub_agent_id_list:
+        # Get the current published version for this sub-agent (from draft version 0)
+        sub_agent_version_no = query_current_version_no(
+            agent_id=sub_agent_id, tenant_id=tenant_id) or 0
         sub_agent_config = await create_agent_config(
             agent_id=sub_agent_id,
             tenant_id=tenant_id,
@@ -91,19 +296,23 @@ async def create_agent_config(
             language=language,
             last_user_query=last_user_query,
             allow_memory_search=allow_memory_search,
+            version_no=sub_agent_version_no,
         )
         managed_agents.append(sub_agent_config)
 
-    tool_list = await create_tool_config_list(agent_id, tenant_id, user_id)
+    # create external A2A agents (synchronous function, no await needed)
+    external_a2a_agents = _get_external_a2a_agents(agent_id, tenant_id, version_no)
+
+    tool_list = await create_tool_config_list(agent_id, tenant_id, user_id, version_no=version_no)
 
     # Build system prompt: prioritize segmented fields, fallback to original prompt field if not available
     duty_prompt = agent_info.get("duty_prompt", "")
     constraint_prompt = agent_info.get("constraint_prompt", "")
     few_shots_prompt = agent_info.get("few_shots_prompt", "")
 
-    # Get template content
-    prompt_template = get_agent_prompt_template(
-        is_manager=len(managed_agents) > 0, language=language)
+    # Get template content (use manager template if has any sub-agents)
+    is_manager = len(managed_agents) > 0 or len(external_a2a_agents) > 0
+    prompt_template = get_agent_prompt_template(is_manager=is_manager, language=language)
 
     # Get app information
     default_app_description = 'Nexent 是一个开源智能体SDK和平台' if language == 'zh' else 'Nexent is an open-source agent SDK and platform'
@@ -113,7 +322,7 @@ async def create_agent_config(
         'APP_DESCRIPTION', tenant_id=tenant_id) or default_app_description
 
     # Get memory list
-    memory_context = build_memory_context(user_id, tenant_id, agent_id)
+    memory_context = build_memory_context(user_id, tenant_id, agent_id, skip_query=not allow_memory_search)
     memory_list = []
     if allow_memory_search and memory_context.user_config.memory_switch:
         logger.debug("Retrieving memory list...")
@@ -163,22 +372,25 @@ async def create_agent_config(
         logger.error(f"Failed to build knowledge base summary: {e}")
 
     # Assemble system_prompt
-    if duty_prompt or constraint_prompt or few_shots_prompt:
-        system_prompt = Template(prompt_template["system_prompt"], undefined=StrictUndefined).render({
-            "duty": duty_prompt,
-            "constraint": constraint_prompt,
-            "few_shots": few_shots_prompt,
-            "tools": {tool.name: tool for tool in tool_list},
-            "managed_agents": {agent.name: agent for agent in managed_agents},
-            "authorized_imports": str(BASE_BUILTIN_MODULES),
-            "APP_NAME": app_name,
-            "APP_DESCRIPTION": app_description,
-            "memory_list": memory_list,
-            "knowledge_base_summary": knowledge_base_summary,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-    else:
-        system_prompt = agent_info.get("prompt", "")
+    # Get skills list for prompt template
+    skills = _get_skills_for_template(agent_id, tenant_id, version_no)
+
+    render_kwargs = {
+        "duty": duty_prompt,
+        "constraint": constraint_prompt,
+        "few_shots": few_shots_prompt,
+        "tools": {tool.name: tool for tool in tool_list},
+        "skills": skills,
+        "managed_agents": {agent.name: agent for agent in managed_agents},
+        "external_a2a_agents": {agent.agent_id: agent for agent in external_a2a_agents},
+        "APP_NAME": app_name,
+        "APP_DESCRIPTION": app_description,
+        "memory_list": memory_list,
+        "knowledge_base_summary": knowledge_base_summary,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "user_id": user_id,
+    }
+    system_prompt = Template(prompt_template["system_prompt"], undefined=StrictUndefined).render(render_kwargs)
 
     if agent_info.get("model_id") is not None:
         model_info = get_model_by_model_id(agent_info.get("model_id"))
@@ -189,26 +401,28 @@ async def create_agent_config(
         name="undefined" if agent_info["name"] is None else agent_info["name"],
         description="undefined" if agent_info["description"] is None else agent_info["description"],
         prompt_templates=await prepare_prompt_templates(
-            is_manager=len(managed_agents) > 0,
+            is_manager=len(managed_agents) > 0 or len(external_a2a_agents) > 0,
             system_prompt=system_prompt,
-            language=language
+            language=language,
+            agent_id=agent_id
         ),
-        tools=tool_list,
+        tools=tool_list + _get_skill_script_tools(agent_id, tenant_id, version_no),
         max_steps=agent_info.get("max_steps", 10),
         model_name=model_name,
         provide_run_summary=agent_info.get("provide_run_summary", False),
-        managed_agents=managed_agents
+        managed_agents=managed_agents,
+        external_a2a_agents=external_a2a_agents
     )
     return agent_config
 
 
-async def create_tool_config_list(agent_id, tenant_id, user_id):
+async def create_tool_config_list(agent_id, tenant_id, user_id, version_no: int = 0):
     # create tool
     tool_config_list = []
     langchain_tools = await discover_langchain_tools()
 
     # now only admin can modify the agent, user_id is not used
-    tools_list = search_tools_for_sub_agent(agent_id, tenant_id)
+    tools_list = search_tools_for_sub_agent(agent_id, tenant_id, version_no=version_no)
     for tool in tools_list:
         param_dict = {}
         for param in tool.get("params", []):
@@ -231,11 +445,32 @@ async def create_tool_config_list(agent_id, tenant_id, user_id):
                     tool_config.metadata = langchain_tool
                     break
 
-        # special logic for knowledge base search tool
+        # special logic for search tools that may use reranking models
         if tool_config.class_name == "KnowledgeBaseSearchTool":
-           tool_config.metadata = {
+            rerank = param_dict.get("rerank", False)
+            rerank_model_name = param_dict.get("rerank_model_name", "")
+            rerank_model = None
+            if rerank and rerank_model_name:
+                rerank_model = get_rerank_model(
+                    tenant_id=tenant_id, model_name=rerank_model_name
+                )
+
+            tool_config.metadata = {
                 "vdb_core": get_vector_db_core(),
                 "embedding_model": get_embedding_model(tenant_id=tenant_id),
+                "rerank_model": rerank_model,
+            }
+        elif tool_config.class_name in ["DifySearchTool", "DataMateSearchTool"]:
+            rerank = param_dict.get("rerank", False)
+            rerank_model_name = param_dict.get("rerank_model_name", "")
+            rerank_model = None
+            if rerank and rerank_model_name:
+                rerank_model = get_rerank_model(
+                    tenant_id=tenant_id, model_name=rerank_model_name
+                )
+
+            tool_config.metadata = {
+                "rerank_model": rerank_model,
             }
         elif tool_config.class_name == "AnalyzeTextFileTool":
             tool_config.metadata = {
@@ -290,7 +525,12 @@ async def discover_langchain_tools():
     return langchain_tools
 
 
-async def prepare_prompt_templates(is_manager: bool, system_prompt: str, language: str = 'zh'):
+async def prepare_prompt_templates(
+    is_manager: bool,
+    system_prompt: str,
+    language: str = 'zh',
+    agent_id: int = None,
+):
     """
     Prepare prompt templates, support multiple languages
 
@@ -298,12 +538,14 @@ async def prepare_prompt_templates(is_manager: bool, system_prompt: str, languag
         is_manager: Whether it is a manager mode
         system_prompt: System prompt content
         language: Language code ('zh' or 'en')
+        agent_id: Agent ID for fetching skill instances
 
     Returns:
         dict: Prompt template configuration
     """
     prompt_templates = get_agent_prompt_template(is_manager, language)
     prompt_templates["system_prompt"] = system_prompt
+
     return prompt_templates
 
 
@@ -336,7 +578,7 @@ def filter_mcp_servers_and_tools(input_agent_config: AgentConfig, mcp_info_dict)
                 used_mcp_urls.add(
                     mcp_info_dict[tool.usage]["remote_mcp_server"])
 
-        # Recursively check sub-agent
+        # Recursively check sub-agents (only internal AgentConfig, not external A2A)
         for sub_agent_config in agent_config.managed_agents:
             check_agent_tools(sub_agent_config)
 
@@ -355,7 +597,21 @@ async def create_agent_run_info(
     user_id: str,
     language: str = "zh",
     allow_memory_search: bool = True,
+    is_debug: bool = False,
 ):
+    # Determine which version_no to use based on is_debug flag
+    # If is_debug=false, use the current published version (current_version_no)
+    # If is_debug=true, use version 0 (draft/editing state)
+    if is_debug:
+        version_no = 0
+    else:
+        # Get current published version number
+        version_no = query_current_version_no(agent_id=agent_id, tenant_id=tenant_id)
+        # Fallback to 0 if no published version exists
+        if version_no is None:
+            version_no = 0
+            logger.info(f"Agent {agent_id} has no published version, using draft version 0")
+
     final_query = await join_minio_file_description_to_query(minio_files=minio_files, query=query)
     model_list = await create_model_config_list(tenant_id)
     agent_config = await create_agent_config(
@@ -365,19 +621,45 @@ async def create_agent_run_info(
         language=language,
         last_user_query=final_query,
         allow_memory_search=allow_memory_search,
+        version_no=version_no,
     )
 
-    remote_mcp_list = await get_remote_mcp_server_list(tenant_id=tenant_id)
+    remote_mcp_list = await get_remote_mcp_server_list(tenant_id=tenant_id, is_need_auth=True)
     default_mcp_url = urljoin(LOCAL_MCP_SERVER, "sse")
     remote_mcp_list.append({
-        "remote_mcp_server_name": "nexent",
+        "remote_mcp_server_name": "outer-apis",
         "remote_mcp_server": default_mcp_url,
-        "status": True
+        "status": True,
+        "authorization_token": None
     })
     remote_mcp_dict = {record["remote_mcp_server_name"]: record for record in remote_mcp_list if record["status"]}
 
-    # Filter MCP servers and tools
-    mcp_host = filter_mcp_servers_and_tools(agent_config, remote_mcp_dict)
+    # Filter MCP servers and tools, and build mcp_host with authorization
+    used_mcp_urls = filter_mcp_servers_and_tools(agent_config, remote_mcp_dict)
+
+    # Build mcp_host list with authorization tokens
+    mcp_host = []
+    for url in used_mcp_urls:
+        # Find the MCP record for this URL
+        mcp_record = None
+        for record in remote_mcp_list:
+            if record.get("remote_mcp_server") == url and record.get("status"):
+                mcp_record = record
+                break
+
+        if mcp_record:
+            mcp_config = {
+                "url": url,
+                "transport": "sse" if url.endswith("/sse") else "streamable-http"
+            }
+            # Add authorization if present
+            auth_token = mcp_record.get("authorization_token")
+            if auth_token:
+                mcp_config["authorization"] = auth_token
+            mcp_host.append(mcp_config)
+        else:
+            # Fallback to string format if record not found
+            mcp_host.append(url)
 
     agent_run_info = AgentRunInfo(
         query=final_query,

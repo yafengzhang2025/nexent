@@ -1,6 +1,13 @@
 import logging
 from typing import Optional, Any, Tuple, Dict, List
 
+from database.token_db import (
+    create_token as create_token_record,
+    generate_access_key,
+    list_tokens_by_user as list_tokens_by_user_record,
+    delete_token as delete_token_record,
+)
+
 import aiohttp
 from fastapi import Header
 from supabase import Client
@@ -120,58 +127,14 @@ async def check_auth_service_health():
                 raise ConnectionError("Auth service is unavailable")
 
 
-async def signup_user(email: EmailStr,
-                      password: str,
-                      is_admin: Optional[bool] = False,
-                      invite_code: Optional[str] = None):
-    """User registration"""
-    client = get_supabase_client()
-    logging.info(
-        f"Receive registration request: email={email}, is_admin={is_admin}")
-    if is_admin:
-        await verify_invite_code(invite_code)
-
-    # Set user metadata, including role information
-    response = client.auth.sign_up({
-        "email": email,
-        "password": password,
-        "options": {
-            "data": {"role": "admin" if is_admin else "user"}
-        }
-    })
-
-    if response.user:
-        user_id = response.user.id
-        user_role = "admin" if is_admin else "user"
-        tenant_id = user_id if is_admin else "tenant_id"
-
-        # Create user tenant relationship
-        insert_user_tenant(user_id=user_id, tenant_id=tenant_id, user_email=email)
-
-        logging.info(
-            f"User {email} registered successfully, role: {user_role}, tenant: {tenant_id}")
-
-        if is_admin:
-            await generate_tts_stt_4_admin(tenant_id, user_id)
-
-        # Initialize tool list for the new tenant (only once per tenant)
-        await init_tool_list_for_tenant(tenant_id, user_id)
-
-        return await parse_supabase_response(is_admin, response, user_role)
-    else:
-        logging.error(
-            "Supabase registration request returned no user object")
-        raise UserRegistrationException(
-            "Registration service is temporarily unavailable, please try again later")
-
-
 async def signup_user_with_invitation(email: EmailStr,
                                       password: str,
-                                      invite_code: Optional[str] = None):
+                                      invite_code: Optional[str] = None,
+                                      auto_login: Optional[bool] = True):
     """User registration with invitation code support"""
     client = get_supabase_client()
     logging.info(
-        f"Receive registration request: email={email}, invite_code={'provided' if invite_code else 'not provided'}")
+        f"Receive registration request: email={email}, invite_code={'provided' if invite_code else 'not provided'}, auto_login={auto_login}")
 
     # Default user role is USER
     user_role = "USER"
@@ -266,7 +229,7 @@ async def signup_user_with_invitation(email: EmailStr,
                     f"Failed to use invitation code {invite_code} for user {user_id}: {str(e)}")
 
         logging.info(
-            f"User {email} registered successfully, role: {user_role}, tenant: {tenant_id}")
+            f"User {email} registered successfully, role: {user_role}, tenant: {tenant_id}, auto_login={auto_login}")
 
         if user_role == "ADMIN":
             await generate_tts_stt_4_admin(tenant_id, user_id)
@@ -274,7 +237,7 @@ async def signup_user_with_invitation(email: EmailStr,
         # Initialize tool list for the new tenant (only once per tenant)
         await init_tool_list_for_tenant(tenant_id, user_id)
 
-        return await parse_supabase_response(False, response, user_role)
+        return await parse_supabase_response(False, response, user_role, auto_login)
     else:
         logging.error(
             "Supabase registration request returned no user object")
@@ -282,7 +245,7 @@ async def signup_user_with_invitation(email: EmailStr,
             "Registration service is temporarily unavailable, please try again later")
 
 
-async def parse_supabase_response(is_admin, response, user_role):
+async def parse_supabase_response(is_admin, response, user_role, auto_login: bool = True):
     """Parse Supabase response and build standardized user registration response"""
     user_data = {
         "id": response.user.id,
@@ -291,7 +254,7 @@ async def parse_supabase_response(is_admin, response, user_role):
     }
 
     session_data = None
-    if response.session:
+    if response.session and auto_login:
         session_data = {
             "access_token": response.session.access_token,
             "refresh_token": response.session.refresh_token,
@@ -517,3 +480,45 @@ def format_role_permissions(permissions: List[Dict[str, Any]]) -> Dict[str, List
         "permissions": formatted_permissions,
         "accessibleRoutes": accessible_routes
     }
+
+
+# -----------------------------
+# Token Management
+# -----------------------------
+
+def create_token(user_id: str) -> Dict[str, Any]:
+    """Create a new API token for the specified user.
+
+    Args:
+        user_id: The user ID who owns this token.
+
+    Returns:
+        Dictionary containing the API token information including token_id.
+    """
+    access_key = generate_access_key()
+    return create_token_record(access_key, user_id)
+
+
+def list_tokens_by_user(user_id: str) -> List[Dict[str, Any]]:
+    """List all tokens for the specified user.
+
+    Args:
+        user_id: The user ID to query token pairs for.
+
+    Returns:
+        List of token information with masked access keys.
+    """
+    return list_tokens_by_user_record(user_id)
+
+
+def delete_token(token_id: int, user_id: str) -> bool:
+    """Soft delete a token.
+
+    Args:
+        token_id: The token ID to delete.
+        user_id: The user ID who owns this token (for authorization).
+
+    Returns:
+        True if the token was deleted, False if not found or not owned by user.
+    """
+    return delete_token_record(token_id, user_id)

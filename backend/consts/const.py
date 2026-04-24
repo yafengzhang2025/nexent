@@ -1,5 +1,6 @@
 import os
 from enum import Enum
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -35,11 +36,37 @@ MAX_CONCURRENT_UPLOADS = 5
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
 ROOT_DIR = os.getenv("ROOT_DIR")
 
+# Container-internal skills storage path
+CONTAINER_SKILLS_PATH = os.getenv("SKILLS_PATH")
+
+
+# Preview Configuration
+FILE_PREVIEW_SIZE_LIMIT = 100 * 1024 * 1024  # 100MB
+# Limit concurrent Office-to-PDF conversions
+MAX_CONCURRENT_CONVERSIONS = 5
+# LibreOffice profile directory
+LIBREOFFICE_PROFILE_DIR = os.getenv(
+    "LIBREOFFICE_PROFILE_DIR",
+    str(Path.home() / ".cache" / "nexent" / "libreoffice-profile"),
+)
+# Supported Office file MIME types
+OFFICE_MIME_TYPES = [
+    'application/msword',  # .doc
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',  # .docx
+    'application/vnd.ms-excel',  # .xls
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',  # .xlsx
+    'application/vnd.ms-powerpoint',  # .ppt
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation'  # .pptx
+]
+
 
 # Supabase Configuration
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SERVICE_ROLE_KEY = os.getenv('SERVICE_ROLE_KEY', SUPABASE_KEY)
+# JWT secret for verifying Supabase-signed access tokens.
+# GoTrue uses GOTRUE_JWT_SECRET (= JWT_SECRET in docker setup) to sign tokens.
+SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET') or os.getenv('JWT_SECRET', '')
 
 
 # ===== To be migrated to frontend configuration =====
@@ -71,6 +98,7 @@ CAN_EDIT_ALL_USER_ROLES = {"SU", "ADMIN", "SPEED"}
 # Permission constants used by list endpoints (e.g., /agent/list, /mcp/list).
 PERMISSION_READ = "READ_ONLY"
 PERMISSION_EDIT = "EDIT"
+PERMISSION_PRIVATE = "PRIVATE"
 
 
 # Deployment Version Configuration
@@ -183,6 +211,7 @@ DEFAULT_MAXIMUM_CHUNK_SIZE = 1536
 
 # MCP Server
 LOCAL_MCP_SERVER = os.getenv("NEXENT_MCP_SERVER")
+MCP_MANAGEMENT_API = os.getenv("MCP_MANAGEMENT_API", "http://localhost:5015")
 
 
 # Invite code
@@ -257,6 +286,7 @@ MODEL_CONFIG_MAPPING = {
 APP_NAME = "APP_NAME"
 APP_DESCRIPTION = "APP_DESCRIPTION"
 ICON_TYPE = "ICON_TYPE"
+ICON_KEY = "ICON_KEY"
 AVATAR_URI = "AVATAR_URI"
 CUSTOM_ICON_URL = "CUSTOM_ICON_URL"
 TENANT_NAME = "TENANT_NAME"
@@ -302,5 +332,17 @@ DEFAULT_EN_TITLE = "New Conversation"
 # Model Engine Configuration
 MODEL_ENGINE_ENABLED = os.getenv("MODEL_ENGINE_ENABLED")
 
+
+# Container Platform Configuration
+IS_DEPLOYED_BY_KUBERNETES = os.getenv("IS_DEPLOYED_BY_KUBERNETES", "false").lower() == "true"
+KUBERNETES_NAMESPACE = os.getenv("KUBERNETES_NAMESPACE", "nexent")
+
+# Northbound API External URL (used for A2A Agent Card URLs)
+# When accessed through reverse proxy, set this to the public-facing URL
+# Falls back to http://localhost:5013 for local development
+_northbound_url = os.getenv("NORTHBOUND_EXTERNAL_URL", "")
+NORTHBOUND_EXTERNAL_URL = _northbound_url.rstrip("/") if _northbound_url else "http://localhost:5013"
+
+
 # APP Version
-APP_VERSION = "v1.8.0"
+APP_VERSION = "v2.0.2"

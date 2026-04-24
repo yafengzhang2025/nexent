@@ -1,8 +1,18 @@
-from sqlalchemy import BigInteger, Boolean, Column, Integer, JSON, Numeric, PrimaryKeyConstraint, Sequence, String, Text, TIMESTAMP
+from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, ForeignKeyConstraint, Integer, JSON, Numeric, PrimaryKeyConstraint, Sequence, String, Text, TIMESTAMP, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import func
 
+# Standard protocol labels used across A2A models
+PROTOCOL_HTTP_JSON = "HTTP+JSON"
+PROTOCOL_JSONRPC = "JSONRPC"
+PROTOCOL_GRPC = "GRPC"
+
 SCHEMA = "nexent"
+
+# Shared doc strings for primary key columns
+_PRIMARY_KEY_DOC = "Primary key, auto-increment"
+_TENANT_ID_DOC = "Tenant ID for multi-tenancy isolation"
 
 # Base class for tables without audit fields
 class SimpleTableBase(DeclarativeBase):
@@ -226,6 +236,7 @@ class AgentInfo(TableBase):
     group_ids = Column(String, doc="Agent group IDs list")
     is_new = Column(Boolean, default=False, doc="Whether this agent is marked as new for the user")
     current_version_no = Column(Integer, nullable=True, doc="Current published version number. NULL means no version published yet")
+    ingroup_permission = Column(String(30), doc="In-group permission: EDIT, READ_ONLY, PRIVATE")
 
 
 class ToolInstance(TableBase):
@@ -236,14 +247,19 @@ class ToolInstance(TableBase):
     __table_args__ = {"schema": SCHEMA}
 
     tool_instance_id = Column(
-        Integer, primary_key=True, nullable=False, doc="ID")
+        Integer,
+        Sequence("ag_tool_instance_t_tool_instance_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc="ID"
+    )
     tool_id = Column(Integer, doc="Tenant tool ID")
     agent_id = Column(Integer, doc="Agent ID")
     params = Column(JSON, doc="Parameter configuration")
     user_id = Column(String(100), doc="User ID")
     tenant_id = Column(String(100), doc="Tenant ID")
     enabled = Column(Boolean, doc="Enabled")
-    version_no = Column(Integer, default=0, nullable=False, doc="Version number. 0 = draft/editing state, >=1 = published snapshot")
+    version_no = Column(Integer, default=0, primary_key=True, nullable=False, doc="Version number. 0 = draft/editing state, >=1 = published snapshot")
 
 
 class KnowledgeRecord(TableBase):
@@ -322,6 +338,11 @@ class McpRecord(TableBase):
         String(200),
         doc="Docker container ID for MCP service, None for non-containerized MCP",
     )
+    authorization_token = Column(
+        String(500),
+        doc="Authorization token for MCP server authentication (e.g., Bearer token)",
+        default=None,
+    )
 
 
 class UserTenant(TableBase):
@@ -346,7 +367,7 @@ class AgentRelation(TableBase):
     __tablename__ = "ag_agent_relation_t"
     __table_args__ = {"schema": SCHEMA}
 
-    relation_id = Column(Integer, primary_key=True, autoincrement=True, nullable=False, doc="Relationship ID, primary key")
+    relation_id = Column(Integer, Sequence("ag_agent_relation_t_relation_id_seq", schema=SCHEMA), primary_key=True, nullable=False, doc="Relationship ID, primary key")
     selected_agent_id = Column(Integer, primary_key=True, doc="Selected agent ID")
     parent_agent_id = Column(Integer, doc="Parent agent ID")
     tenant_id = Column(String(100), doc="Tenant ID")
@@ -463,7 +484,7 @@ class AgentVersion(TableBase):
     __table_args__ = {"schema": SCHEMA}
 
     id = Column(BigInteger, Sequence("ag_tenant_agent_version_t_id_seq", schema=SCHEMA),
-                primary_key=True, nullable=False, doc="Primary key, auto-increment")
+                primary_key=True, nullable=False, doc=_PRIMARY_KEY_DOC)
     tenant_id = Column(String(100), nullable=False, doc="Tenant ID")
     agent_id = Column(Integer, nullable=False, doc="Agent ID")
     version_no = Column(Integer, nullable=False, doc="Version number, starts from 1. Does not include 0 (draft)")
@@ -472,3 +493,362 @@ class AgentVersion(TableBase):
     source_version_no = Column(Integer, doc="Source version number. If this version is a rollback, record the source version")
     source_type = Column(String(30), doc="Source type: NORMAL (normal publish) / ROLLBACK (rollback and republish)")
     status = Column(String(30), default="RELEASED", doc="Version status: RELEASED / DISABLED / ARCHIVED")
+
+
+class UserTokenInfo(TableBase):
+    """
+    User token (AK/SK) information table
+    """
+    __tablename__ = "user_token_info_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    token_id = Column(Integer, Sequence("user_token_info_t_token_id_seq", schema=SCHEMA),
+                      primary_key=True, nullable=False, doc="Token ID, unique primary key")
+    access_key = Column(String(100), nullable=False, doc="Access Key (AK)")
+    user_id = Column(String(100), nullable=False, doc="User ID who owns this token")
+
+
+class UserTokenUsageLog(TableBase):
+    """
+    User token usage log table
+    """
+    __tablename__ = "user_token_usage_log_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    token_usage_id = Column(Integer, Sequence("user_token_usage_log_t_token_usage_id_seq", schema=SCHEMA),
+                            primary_key=True, nullable=False, doc="Token usage log ID, unique primary key")
+    token_id = Column(Integer, nullable=False, doc="Foreign key to user_token_info_t.token_id")
+    call_function_name = Column(String(100), doc="API function name being called")
+    related_id = Column(Integer, doc="Related resource ID (e.g., conversation_id)")
+    meta_data = Column(JSONB, doc="Additional metadata for this usage log entry, stored as JSON")
+
+
+class SkillInfo(TableBase):
+    """
+    Skill information table - stores skill metadata and content.
+    """
+    __tablename__ = "ag_skill_info_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    skill_id = Column(Integer, Sequence("ag_skill_info_t_skill_id_seq", schema=SCHEMA),
+                      primary_key=True, nullable=False, autoincrement=True, doc="Skill ID")
+    skill_name = Column(String(100), nullable=False, unique=True, doc="Unique skill name")
+    skill_description = Column(String(1000), doc="Skill description")
+    skill_tags = Column(JSON, doc="Skill tags as JSON array")
+    skill_content = Column(Text, doc="Skill content in markdown format")
+    params = Column(JSON, doc="Skill configuration parameters as JSON object")
+    source = Column(String(30), nullable=False, default="official",
+                    doc="Skill source: official, custom, etc.")
+
+
+class SkillToolRelation(TableBase):
+    """
+    Skill-Tool relation table - many-to-many relationship between skills and tools.
+    """
+    __tablename__ = "ag_skill_tools_rel_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    rel_id = Column(Integer, Sequence("ag_skill_tools_rel_t_rel_id_seq", schema=SCHEMA),
+                    primary_key=True, nullable=False, autoincrement=True, doc="Relation ID")
+    skill_id = Column(Integer, nullable=False, doc="Foreign key to ag_skill_info_t.skill_id")
+    tool_id = Column(Integer, nullable=False, doc="Foreign key to ag_tool_info_t.tool_id")
+
+
+class SkillInstance(TableBase):
+    """
+    Skill instance table - stores per-agent skill configuration.
+    Similar to ToolInstance, stores skill settings for each agent version.
+    Note: skill_description and skill_content removed - these are now retrieved from ag_skill_info_t.
+    """
+    __tablename__ = "ag_skill_instance_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    skill_instance_id = Column(
+        Integer,
+        Sequence("ag_skill_instance_t_skill_instance_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc="Skill instance ID"
+    )
+    skill_id = Column(Integer, nullable=False, doc="Foreign key to ag_skill_info_t.skill_id")
+    agent_id = Column(Integer, nullable=False, doc="Agent ID")
+    user_id = Column(String(100), doc="User ID")
+    tenant_id = Column(String(100), doc="Tenant ID")
+    enabled = Column(Boolean, default=True, doc="Whether this skill is enabled for the agent")
+    version_no = Column(Integer, default=0, primary_key=True, nullable=False, doc="Version number. 0 = draft/editing state, >=1 = published snapshot")
+
+
+class OuterApiTool(TableBase):
+    """
+    Outer API tools table - stores converted OpenAPI tools as MCP tools.
+    """
+    __tablename__ = "ag_outer_api_tools"
+    __table_args__ = {"schema": SCHEMA}
+
+    id = Column(BigInteger, Sequence("ag_outer_api_tools_id_seq", schema=SCHEMA),
+                primary_key=True, nullable=False, doc="Tool ID, unique primary key")
+    name = Column(String(100), nullable=False, doc="Tool name (unique identifier)")
+    description = Column(Text, doc="Tool description")
+    method = Column(String(10), doc="HTTP method: GET/POST/PUT/DELETE")
+    url = Column(Text, nullable=False, doc="API endpoint URL")
+    headers_template = Column(JSONB, doc="Headers template as JSON")
+    query_template = Column(JSONB, doc="Query parameters template as JSON")
+    body_template = Column(JSONB, doc="Request body template as JSON")
+    input_schema = Column(JSONB, doc="MCP input schema as JSON")
+    tenant_id = Column(String(100), doc="Tenant ID for multi-tenancy")
+    is_available = Column(Boolean, default=True, doc="Whether the tool is available")
+
+
+class A2ANacosConfig(TableBase):
+    """
+    Nacos configuration for external A2A agent discovery.
+    Stores connection info and discovery scope.
+    """
+    __tablename__ = "ag_a2a_nacos_config_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, doc=_PRIMARY_KEY_DOC)
+    config_id = Column(String(64), unique=True, nullable=False, doc="Unique config identifier for API reference")
+
+    # Nacos connection
+    nacos_addr = Column(String(512), nullable=False, doc="Nacos server address, e.g., http://nacos-server:8848")
+    nacos_username = Column(String(100), doc="Nacos username for authentication")
+    nacos_password = Column(String(256), doc="Nacos password, encrypted at rest")
+
+    # Discovery scope
+    namespace_id = Column(String(100), default="public", doc="Nacos namespace for service discovery")
+
+    # Metadata
+    name = Column(String(100), nullable=False, doc="Display name for this Nacos config")
+    description = Column(Text, doc="Description of this Nacos configuration")
+
+    # Tenant isolation
+    tenant_id = Column(String(100), nullable=False, doc="Tenant ID for multi-tenancy")
+
+    # Status
+    is_active = Column(Boolean, default=True, doc="Whether this Nacos config is active")
+    last_scan_at = Column(TIMESTAMP(timezone=False), doc="Last time a scan was performed using this config")
+
+
+class A2AExternalAgent(TableBase):
+    """
+    External A2A agents discovered from URL or Nacos.
+    Caches Agent Cards for A2A Client role.
+    """
+    __tablename__ = "ag_a2a_external_agent_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, doc=_PRIMARY_KEY_DOC)
+
+    # Agent metadata (cached from Agent Card)
+    name = Column(String(255), nullable=False, doc="Agent name from Agent Card")
+    description = Column(Text, doc="Agent description from Agent Card")
+    version = Column(String(50), doc="Agent version from Agent Card, e.g., 1.2.0")
+
+    # Primary interface (extracted from supportedInterfaces for quick access)
+    # In A2A 1.0, this should store the http-json-rpc URL
+    agent_url = Column(String(512), nullable=False, doc="Primary A2A endpoint URL (http-json-rpc by default)")
+
+    # Protocol type for calling this agent: JSONRPC, HTTP+JSON, GRPC
+    protocol_type = Column(String(20), default=PROTOCOL_JSONRPC, doc="Protocol type for calling this agent")
+
+    # Capabilities
+    streaming = Column(Boolean, default=False, doc="Whether this agent supports SSE streaming")
+
+    # All supported interfaces (full JSON array from Agent Card)
+    # Format: [{protocolBinding, url, protocolVersion}, ...]
+    supported_interfaces = Column(JSON, doc="All supported interfaces array")
+
+    # Source information
+    source_type = Column(String(20), nullable=False, doc="Discovery source: url or nacos")
+
+    # For URL mode
+    source_url = Column(String(512), doc="Direct URL to agent card")
+
+    # For Nacos mode
+    nacos_config_id = Column(String(64), doc="Reference to Nacos config used for discovery")
+    nacos_agent_name = Column(String(255), doc="Original name used for Nacos query")
+
+    # Tenant isolation
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+
+    # Full original Agent Card
+    raw_card = Column(JSON, doc="Full original Agent Card JSON from discovery")
+
+    # Cache management
+    cached_at = Column(TIMESTAMP(timezone=False), doc="Timestamp when Agent Card was cached")
+    cache_expires_at = Column(TIMESTAMP(timezone=False), doc="Timestamp when cache expires")
+
+    # Health check status
+    is_available = Column(Boolean, default=True, doc="Whether this agent is currently reachable")
+    last_check_at = Column(TIMESTAMP(timezone=False), doc="Last health check timestamp")
+    last_check_result = Column(String(50), doc="Last health check result: OK, ERROR, TIMEOUT")
+
+
+class A2AExternalAgentRelation(TableBase):
+    """
+    Relation between local agent and external A2A agent.
+    Enables local agents to call external A2A agents as sub-agents.
+    """
+    __tablename__ = "ag_a2a_external_agent_relation_t"
+    __table_args__ = (
+        UniqueConstraint(
+            "local_agent_id", "external_agent_id",
+            name="uq_local_external_agent",
+            deferrable=True,
+        ),
+        ForeignKeyConstraint(
+            ["external_agent_id"],
+            [f"{SCHEMA}.ag_a2a_external_agent_t.id"],
+            name="fk_external_agent",
+            deferrable=True,
+        ),
+        {"schema": SCHEMA},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, doc=_PRIMARY_KEY_DOC)
+
+    # Local agent (parent)
+    local_agent_id = Column(Integer, nullable=False, doc="Local parent agent ID")
+
+    # External A2A agent (sub-agent) - FK to ag_a2a_external_agent_t.id
+    external_agent_id = Column(BigInteger, nullable=False, doc="External A2A agent ID (FK to ag_a2a_external_agent_t.id)")
+
+    # Tenant isolation
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+
+    # Status
+    is_enabled = Column(Boolean, default=True, doc="Whether this relation is active")
+
+
+class A2AServerAgent(TableBase):
+    """
+    Local agents registered as A2A Server endpoints.
+    Exposes Agent Cards for external A2A callers.
+    """
+    __tablename__ = "ag_a2a_server_agent_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, doc=_PRIMARY_KEY_DOC)
+
+    # Link to local agent
+    agent_id = Column(Integer, nullable=False, doc="Local agent ID")
+
+    # Ownership
+    user_id = Column(String(100), nullable=False, doc="Owner user ID")
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+
+    # Generated endpoint ID
+    endpoint_id = Column(String(64), unique=True, nullable=False, doc="Generated endpoint ID")
+
+    # Basic info (extracted from local agent, can be overridden)
+    name = Column(String(255), nullable=False, doc="Agent name exposed in Agent Card")
+    description = Column(Text, doc="Agent description exposed in Agent Card")
+    version = Column(String(50), doc="Agent version exposed in Agent Card")
+
+    # Primary endpoint URL (http-json-rpc by default)
+    agent_url = Column(String(512), doc="Primary A2A endpoint URL (http-json-rpc by default)")
+
+    # Capabilities
+    streaming = Column(Boolean, default=False, doc="Whether this agent supports SSE streaming")
+
+    # All supported interfaces (A2A 1.0 compliant)
+    # Format: [{protocolBinding, url, protocolVersion}, ...]
+    supported_interfaces = Column(JSON, doc="All supported interfaces: [{protocolBinding, url, protocolVersion}, ...]")
+
+    # Agent Card customization (partial overrides only)
+    card_overrides = Column(JSON, doc="User customizations for Agent Card (partial override)")
+
+    # A2A Server status
+    is_enabled = Column(Boolean, default=False, doc="Whether A2A Server is enabled for this agent")
+
+    # Raw Agent Card (generated from settings, for debugging)
+    raw_card = Column(JSON, doc="Generated Agent Card JSON (for debugging)")
+
+    # Publishing timestamps
+    published_at = Column(TIMESTAMP(timezone=False), doc="Timestamp when A2A Server was last enabled")
+    unpublished_at = Column(TIMESTAMP(timezone=False), doc="Timestamp when A2A Server was disabled")
+
+
+class A2ATask(SimpleTableBase):
+    """
+    A2A tasks for tracking requests.
+    Task is the unit of work, not all requests need to create a task.
+    """
+    __tablename__ = "ag_a2a_task_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    # Core identifiers (following A2A spec)
+    id = Column(String(64), primary_key=True, doc="Task ID (A2A spec: taskId)")
+    context_id = Column(String(64), doc="Context ID for grouping related tasks")
+
+    # Endpoint and caller info
+    endpoint_id = Column(String(64), nullable=False, doc="Endpoint ID")
+    caller_user_id = Column(String(100), doc="User ID of the caller")
+    caller_tenant_id = Column(String(100), doc="Tenant ID of the caller")
+
+    # Request data
+    raw_request = Column(JSON, doc="Original A2A request payload")
+
+    # Task state (following A2A TaskState enum)
+    task_state = Column(String(50), nullable=False, server_default="TASK_STATE_SUBMITTED", doc="Task state: TASK_STATE_SUBMITTED, TASK_STATE_WORKING, TASK_STATE_COMPLETED, TASK_STATE_FAILED, TASK_STATE_CANCELED, TASK_STATE_INPUT_REQUIRED, TASK_STATE_REJECTED, TASK_STATE_AUTH_REQUIRED")
+    state_timestamp = Column(TIMESTAMP(timezone=False), doc="Task state last update timestamp")
+
+    # Task result
+    result_data = Column(JSON, doc="Task final result data")
+
+    # Timestamps
+    create_time = Column(TIMESTAMP(timezone=False), server_default=func.now(), doc="Task creation timestamp")
+    update_time = Column(TIMESTAMP(timezone=False), server_default=func.now(), onupdate=func.now(), doc="Task last update timestamp")
+    completed_at = Column(TIMESTAMP(timezone=False), doc="Task completion timestamp")
+
+
+class A2AMessage(SimpleTableBase):
+    """
+    A2A messages within tasks.
+    Stores conversation history for multi-turn interactions.
+    """
+    __tablename__ = "ag_a2a_message_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    # Core identifiers (following A2A spec)
+    message_id = Column(String(64), primary_key=True, doc="Message ID (A2A spec: messageId)")
+    task_id = Column(String(64), ForeignKey(f"{SCHEMA}.ag_a2a_task_t.id", ondelete="CASCADE"), nullable=True, doc="Task ID this message belongs to (nullable for standalone/simple requests)")
+
+    # Message attributes
+    message_index = Column(Integer, nullable=False, doc="Order of message in the conversation")
+    role = Column(String(20), nullable=False, doc="Message sender role: user or agent")
+
+    # Message content (following A2A Part structure)
+    parts = Column(JSON, nullable=False, doc="Message parts following A2A Part structure")
+    meta_data = Column(JSON, doc="Optional metadata")
+    extensions = Column(JSON, doc="Extension URI list")
+
+    # References to other tasks (optional)
+    reference_task_ids = Column(JSON, doc="Referenced task IDs array for multi-turn scenarios")
+
+    # Timestamp
+    create_time = Column(TIMESTAMP(timezone=False), server_default=func.now(), doc="Message creation timestamp")
+
+
+class A2AArtifact(SimpleTableBase):
+    """
+    A2A artifacts. Stores the output/artifacts produced by a task.
+    """
+    __tablename__ = "ag_a2a_artifact_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    # Core identifiers (following A2A spec)
+    id = Column(String(64), primary_key=True, doc="Internal primary key")
+    artifact_id = Column(String(64), nullable=False, doc="Artifact ID (A2A spec: artifactId)")
+    task_id = Column(String(64), ForeignKey(f"{SCHEMA}.ag_a2a_task_t.id", ondelete="CASCADE"), nullable=False, doc="Task ID this artifact belongs to")
+
+    # Artifact attributes
+    name = Column(String(255), doc="Human-readable artifact name")
+    description = Column(Text, doc="Artifact description")
+    parts = Column(JSON, nullable=False, doc="Artifact parts following A2A Part structure")
+    meta_data = Column(JSON, doc="Artifact metadata")
+    extensions = Column(JSON, doc="Extension URI list")
+
+    # Timestamp
+    create_time = Column(TIMESTAMP(timezone=False), server_default=func.now(), doc="Artifact creation timestamp")

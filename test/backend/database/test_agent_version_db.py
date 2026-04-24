@@ -78,6 +78,7 @@ from backend.database.agent_version_db import (
     query_agent_draft,
     insert_version,
     update_version_status,
+    update_version,
     update_agent_current_version,
     insert_agent_snapshot,
     insert_tool_snapshot,
@@ -86,6 +87,9 @@ from backend.database.agent_version_db import (
     delete_agent_snapshot,
     delete_tool_snapshot,
     delete_relation_snapshot,
+    delete_skill_snapshot,
+    query_skill_instances_snapshot,
+    insert_skill_snapshot,
     get_next_version_no,
     delete_version,
     SOURCE_TYPE_NORMAL,
@@ -1178,5 +1182,323 @@ def test_delete_version_not_found(monkeypatch, mock_session):
         version_no=999,
         deleted_by="user1",
     )
-    
+
+    assert result == 0
+
+
+def test_update_version_success(monkeypatch, mock_session):
+    """Test successfully updating version metadata"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 1
+    session.execute.return_value = mock_result
+
+    # Mock SQLAlchemy update to avoid ArgumentError
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    # Mock the functions directly in the imported module
+    # This is needed because agent_version_db imports get_db_session and as_dict at module level
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    result = update_version(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+        version_name="Updated Version Name",
+        release_note="Updated release note",
+        updated_by="user1",
+    )
+
+    assert result == 1
+    session.execute.assert_called_once()
+
+
+def test_update_version_only_version_name(monkeypatch, mock_session):
+    """Test updating version with only version_name"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 1
+    session.execute.return_value = mock_result
+
+    # Mock SQLAlchemy update to avoid ArgumentError
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    result = update_version(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+        version_name="New Version Name",
+    )
+
+    assert result == 1
+    session.execute.assert_called_once()
+
+
+def test_update_version_only_release_note(monkeypatch, mock_session):
+    """Test updating version with only release_note"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 1
+    session.execute.return_value = mock_result
+
+    # Mock SQLAlchemy update to avoid ArgumentError
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    result = update_version(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+        release_note="New release note",
+    )
+
+    assert result == 1
+    session.execute.assert_called_once()
+
+
+def test_update_version_no_changes(monkeypatch, mock_session):
+    """Test updating version with no changes (all None values)"""
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = MagicMock()
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+
+    result = update_version(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+    )
+
+    assert result == 0
+
+
+def test_update_version_not_found(monkeypatch, mock_session):
+    """Test updating version that doesn't exist"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 0
+    session.execute.return_value = mock_result
+
+    # Mock SQLAlchemy update to avoid ArgumentError
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    result = update_version(
+        agent_id=999,
+        tenant_id="tenant1",
+        version_no=999,
+        version_name="Non-existent version",
+    )
+
+    assert result == 0
+
+
+# ============== Skill Instance Snapshot Function Tests ==============
+
+
+class MockSkillInstance:
+    """Mock for SkillInstance model"""
+    def __init__(self):
+        self.skill_instance_id = 1
+        self.skill_id = 1
+        self.agent_id = 1
+        self.tenant_id = "tenant1"
+        self.version_no = 1
+        self.enabled = True
+        self.delete_flag = "N"
+        self.__dict__ = {
+            "skill_instance_id": 1,
+            "skill_id": 1,
+            "agent_id": 1,
+            "tenant_id": "tenant1",
+            "version_no": 1,
+            "enabled": True,
+            "delete_flag": "N",
+        }
+
+
+def test_query_skill_instances_snapshot_success(monkeypatch, mock_session):
+    """Test successfully querying skill instances snapshot"""
+    session, query = mock_session
+    mock_skill1 = MockSkillInstance()
+    mock_skill1.skill_instance_id = 1
+    mock_skill1.skill_id = 10
+    mock_skill1.__dict__['skill_instance_id'] = 1
+    mock_skill1.__dict__['skill_id'] = 10
+
+    mock_skill2 = MockSkillInstance()
+    mock_skill2.skill_instance_id = 2
+    mock_skill2.skill_id = 20
+    mock_skill2.__dict__['skill_instance_id'] = 2
+    mock_skill2.__dict__['skill_id'] = 20
+
+    mock_filter = MagicMock()
+    mock_filter.all = lambda: [mock_skill1, mock_skill2]
+    query.filter.return_value = mock_filter
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import query_skill_instances_snapshot
+    result = query_skill_instances_snapshot(agent_id=1, tenant_id="tenant1", version_no=1)
+
+    assert len(result) == 2
+    assert result[0]["skill_id"] == 10
+    assert result[1]["skill_id"] == 20
+
+
+def test_query_skill_instances_snapshot_empty(monkeypatch, mock_session):
+    """Test querying skill instances snapshot when no skills exist"""
+    session, query = mock_session
+
+    mock_filter = MagicMock()
+    mock_filter.all = lambda: []
+    query.filter.return_value = mock_filter
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import query_skill_instances_snapshot
+    result = query_skill_instances_snapshot(agent_id=999, tenant_id="tenant1", version_no=1)
+
+    assert result == []
+
+
+def test_insert_skill_snapshot_success(monkeypatch, mock_session):
+    """Test successfully inserting skill snapshot"""
+    session, query = mock_session
+
+    session.execute = MagicMock()
+
+    mock_sqlalchemy_insert(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import insert_skill_snapshot
+    skill_data = {
+        "skill_id": 1,
+        "agent_id": 1,
+        "tenant_id": "tenant1",
+        "version_no": 1,
+        "enabled": True,
+    }
+
+    insert_skill_snapshot(skill_data)
+
+    session.execute.assert_called_once()
+
+
+def test_delete_skill_snapshot_success(monkeypatch, mock_session):
+    """Test successfully deleting skill snapshot with deleted_by"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 3
+    session.execute.return_value = mock_result
+
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import delete_skill_snapshot
+    result = delete_skill_snapshot(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+        deleted_by="user1",
+    )
+
+    assert result == 3
+    session.execute.assert_called_once()
+
+
+def test_delete_skill_snapshot_without_deleted_by(monkeypatch, mock_session):
+    """Test deleting skill snapshot without deleted_by parameter"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 2
+    session.execute.return_value = mock_result
+
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import delete_skill_snapshot
+    result = delete_skill_snapshot(
+        agent_id=1,
+        tenant_id="tenant1",
+        version_no=1,
+    )
+
+    assert result == 2
+    session.execute.assert_called_once()
+
+
+def test_delete_skill_snapshot_not_found(monkeypatch, mock_session):
+    """Test deleting skill snapshot that doesn't exist"""
+    session, query = mock_session
+
+    mock_result = MagicMock()
+    mock_result.rowcount = 0
+    session.execute.return_value = mock_result
+
+    mock_sqlalchemy_update(monkeypatch)
+
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__.return_value = session
+    mock_ctx.__exit__.return_value = None
+    monkeypatch.setattr(agent_version_db_module, "get_db_session", lambda: mock_ctx)
+    monkeypatch.setattr(agent_version_db_module, "as_dict", mock_as_dict)
+
+    from backend.database.agent_version_db import delete_skill_snapshot
+    result = delete_skill_snapshot(
+        agent_id=999,
+        tenant_id="tenant1",
+        version_no=999,
+        deleted_by="user1",
+    )
+
     assert result == 0

@@ -22,12 +22,13 @@ import {
   Eye,
   Plus,
   LoaderCircle,
-  RefreshCw,
   FileText,
   Container,
   Upload as UploadIcon,
   Unplug,
   Settings,
+  Import,
+  RefreshCw,
 } from "lucide-react";
 
 import { McpConfigModalProps } from "@/types/agentConfig";
@@ -37,6 +38,9 @@ import { useMcpConfig } from "@/hooks/useMcpConfig";
 import McpToolListModal from "@/components/mcp/McpToolListModal";
 import McpEditServerModal from "@/components/mcp/McpEditServerModal";
 import McpContainerLogsModal from "@/components/mcp/McpContainerLogsModal";
+import { API_ENDPOINTS } from "@/services/api";
+import { getAuthHeaders } from "@/lib/auth";
+import log from "@/lib/logger";
 
 const { Text, Title } = Typography;
 
@@ -58,6 +62,7 @@ export default function McpConfigModal({
     healthCheckLoading,
     loadServerList,
     loadContainerList,
+    refreshToolsAndAgents,
     handleAddServer,
     handleDeleteServer,
     handleViewTools,
@@ -67,12 +72,20 @@ export default function McpConfigModal({
     handleUploadImage,
     handleDeleteContainer,
     handleViewLogs,
+    handleGetMcpRecord,
   } = useMcpConfig({ enabled: visible });
+
+  // OpenAPI to MCP state
+  const [openApiJson, setOpenApiJson] = useState("");
+  const [importingOpenApi, setImportingOpenApi] = useState(false);
+  const [outerApiTools, setOuterApiTools] = useState<any[]>([]);
+  const [loadingOuterApiTools, setLoadingOuterApiTools] = useState(false);
 
   // Local UI state
   const [addingServer, setAddingServer] = useState(false);
   const [newServerName, setNewServerName] = useState("");
   const [newServerUrl, setNewServerUrl] = useState("");
+  const [newServerAuthorizationToken, setNewServerAuthorizationToken] = useState("");
 
   const [toolsModalVisible, setToolsModalVisible] = useState(false);
   const [currentServerTools, setCurrentServerTools] = useState<any[]>([]);
@@ -82,6 +95,7 @@ export default function McpConfigModal({
   const [editServerModalVisible, setEditServerModalVisible] = useState(false);
   const [editingServer, setEditingServer] = useState<any>(null);
   const [updatingServer, setUpdatingServer] = useState(false);
+  const [loadingMcpRecord, setLoadingMcpRecord] = useState(false);
 
   const [addingContainer, setAddingContainer] = useState(false);
   const [containerConfigJson, setContainerConfigJson] = useState("");
@@ -90,14 +104,13 @@ export default function McpConfigModal({
   );
 
   const [logsModalVisible, setLogsModalVisible] = useState(false);
-  const [currentContainerLogs, setCurrentContainerLogs] = useState("");
   const [currentContainerId, setCurrentContainerId] = useState("");
-  const [loadingLogs, setLoadingLogs] = useState(false);
 
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadFileList, setUploadFileList] = useState<UploadFile[]>([]);
   const [uploadPort, setUploadPort] = useState<number | undefined>(undefined);
   const [uploadServiceName, setUploadServiceName] = useState("");
+  const [uploadAuthorizationToken, setUploadAuthorizationToken] = useState("");
 
   const actionsLocked = updatingTools || addingContainer || uploadingImage;
   const noMcpEditPermissionTitle = t("mcpConfig.permission.noEdit");
@@ -158,10 +171,15 @@ export default function McpConfigModal({
     }
 
     setAddingServer(true);
-    const result = await handleAddServer(newServerUrl.trim(), serverName);
+    const result = await handleAddServer(
+      newServerUrl.trim(),
+      serverName,
+      newServerAuthorizationToken.trim() || null
+    );
     if (result.success) {
       setNewServerName("");
       setNewServerUrl("");
+      setNewServerAuthorizationToken("");
       message.success(result.messageKey ? t(result.messageKey) : t("mcpService.message.addServerSuccess"));
     } else {
       message.error(result.messageKey ? t(result.messageKey) : (result.message || t("mcpConfig.message.addServerFailed")));
@@ -244,12 +262,29 @@ export default function McpConfigModal({
     }
   };
 
-  const onEditServer = (server: any) => {
+  const onEditServer = async (server: any) => {
     setEditingServer(server);
     setEditServerModalVisible(true);
+    setLoadingMcpRecord(true);
+
+    // If mcp_id is available, fetch the latest record data including authorization_token
+    if (server.mcp_id) {
+      const result = await handleGetMcpRecord(server.mcp_id);
+      if (result.success && result.data) {
+        setEditingServer({
+          ...server,
+          service_name: result.data.mcp_name,
+          mcp_url: result.data.mcp_server,
+          authorization_token: result.data.authorization_token,
+        });
+      } else {
+        message.error(result.messageKey ? t(result.messageKey) : (result.message || t("mcpConfig.message.getMcpRecordFailed")));
+      }
+    }
+    setLoadingMcpRecord(false);
   };
 
-  const onSaveEditedServer = async (name: string, url: string) => {
+  const onSaveEditedServer = async (name: string, url: string, authorizationToken?: string | null) => {
     if (!editingServer) return;
     if (!name.trim() || !url.trim()) {
       message.error(t("mcpConfig.message.nameAndUrlRequired"));
@@ -272,7 +307,8 @@ export default function McpConfigModal({
       editingServer.service_name,
       editingServer.mcp_url,
       name.trim(),
-      url.trim()
+      url.trim(),
+      authorizationToken
     );
     if (result.success) {
       setEditServerModalVisible(false);
@@ -343,13 +379,19 @@ export default function McpConfigModal({
     }
 
     setUploadingImage(true);
-    const result = await handleUploadImage(file, uploadPort, uploadServiceName.trim() || undefined);
+    const result = await handleUploadImage(
+      file,
+      uploadPort,
+      uploadServiceName.trim() || undefined,
+      uploadAuthorizationToken.trim() || undefined
+    );
     if (!result.success) {
       message.error(result.messageKey ? t(result.messageKey) : (result.message || t("mcpConfig.message.uploadImageFailed")));
     } else {
       setUploadFileList([]);
       setUploadPort(undefined);
       setUploadServiceName("");
+      setUploadAuthorizationToken("");
       message.success(result.messageKey ? t(result.messageKey) : t("mcpService.message.uploadImageSuccess"));
     }
     setUploadingImage(false);
@@ -383,18 +425,106 @@ export default function McpConfigModal({
 
   const onViewLogs = async (containerId: string) => {
     setCurrentContainerId(containerId);
-    setLoadingLogs(true);
     setLogsModalVisible(true);
-    setCurrentContainerLogs("");
+  };
 
-    const result = await handleViewLogs(containerId, 500);
-    if (result.success) {
-      setCurrentContainerLogs(result.data);
-    } else {
-      message.error(result.messageKey ? t(result.messageKey) : t("mcpConfig.message.getContainerLogsFailed"));
-      setCurrentContainerLogs(t("mcpConfig.message.getContainerLogsFailed"));
+  // OpenAPI to MCP handlers
+  const loadOuterApiTools = async () => {
+    setLoadingOuterApiTools(true);
+    try {
+      const response = await fetch(API_ENDPOINTS.tool.outerApiTools, {
+        headers: getAuthHeaders(),
+      });
+      const result = await response.json();
+      if (result.data) {
+        setOuterApiTools(result.data);
+      } else {
+        message.error(t("mcpConfig.openApiToMcp.message.loadToolsFailed"));
+      }
+    } catch (error) {
+      log.error("Failed to load outer API tools:", error);
+      message.error(t("mcpConfig.openApiToMcp.message.loadToolsFailed"));
     }
-    setLoadingLogs(false);
+    setLoadingOuterApiTools(false);
+  };
+
+  const onImportOpenApi = async () => {
+    if (!openApiJson.trim()) {
+      message.error(t("mcpConfig.openApiToMcp.jsonPlaceholder"));
+      return;
+    }
+
+    let parsedJson;
+    try {
+      parsedJson = JSON.parse(openApiJson);
+    } catch {
+      message.error(t("mcpConfig.openApiToMcp.message.invalidJson"));
+      return;
+    }
+
+    setImportingOpenApi(true);
+    try {
+      const response = await fetch(API_ENDPOINTS.tool.importOpenapi, {
+        method: "POST",
+        headers: {
+          ...getAuthHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(parsedJson),
+      });
+
+      if (response.ok) {
+        message.success(t("mcpConfig.openApiToMcp.message.importSuccess"));
+        setOpenApiJson("");
+        await loadOuterApiTools();
+        await refreshToolsAndAgents();
+      } else {
+        const errorData = await response.json();
+        message.error(
+          errorData.detail || t("mcpConfig.openApiToMcp.message.importFailed")
+        );
+      }
+    } catch (error) {
+      log.error("Failed to import OpenAPI:", error);
+      message.error(t("mcpConfig.openApiToMcp.message.importFailed"));
+    }
+    setImportingOpenApi(false);
+  };
+
+  const onDeleteOuterApiTool = (tool: any) => {
+    confirm({
+      title: t("mcpConfig.delete.confirmTitle"),
+      content: t("mcpConfig.delete.confirmContent", {
+        name: tool.name,
+      }),
+      okText: t("common.delete", "Delete"),
+      onOk: async () => {
+        try {
+          const response = await fetch(
+            API_ENDPOINTS.tool.deleteOuterApiTool(tool.id),
+            {
+              method: "DELETE",
+              headers: getAuthHeaders(),
+            }
+          );
+
+          if (response.ok) {
+            message.success(
+              t("mcpConfig.openApiToMcp.message.deleteSuccess")
+            );
+            await loadOuterApiTools();
+            await refreshToolsAndAgents();
+          } else {
+            message.error(
+              t("mcpConfig.openApiToMcp.message.deleteFailed")
+            );
+          }
+        } catch (error) {
+          log.error("Failed to delete outer API tool:", error);
+          message.error(t("mcpConfig.openApiToMcp.message.deleteFailed"));
+        }
+      },
+    });
   };
 
   // Server list table columns
@@ -569,6 +699,52 @@ export default function McpConfigModal({
     },
   ];
 
+  // Outer API tools table columns
+  const outerApiToolsColumns = [
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.name"),
+      dataIndex: "name",
+      key: "name",
+      width: "35%",
+      ellipsis: true,
+    },
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.description"),
+      dataIndex: "description",
+      key: "description",
+      width: "45%",
+      ellipsis: true,
+    },
+    {
+      title: t("mcpConfig.openApiToMcp.toolList.column.action"),
+      key: "action",
+      width: "20%",
+      render: (_: any, record: any) => (
+        <Space size="small">
+          {renderPermissionControlledButton({
+            isReadOnly: false,
+            button: {
+              type: "link",
+              danger: true,
+              icon: <Trash size={16} />,
+              onClick: () => onDeleteOuterApiTool(record),
+              size: "small",
+              disabled: actionsLocked,
+              children: t("mcpConfig.serverList.button.delete"),
+            },
+          })}
+        </Space>
+      ),
+    },
+  ];
+
+  // Load outer API tools when modal opens
+  useEffect(() => {
+    if (visible) {
+      loadOuterApiTools();
+    }
+  }, [visible]);
+
   return (
     <>
       <Modal
@@ -577,7 +753,7 @@ export default function McpConfigModal({
         onCancel={actionsLocked ? undefined : onCancel}
         width={1200}
         closable={!actionsLocked}
-        maskClosable={!actionsLocked}
+        mask={{ closable: !actionsLocked }}
         footer={[
           <Button key="cancel" onClick={onCancel} disabled={actionsLocked}>
             {actionsLocked
@@ -638,49 +814,66 @@ export default function McpConfigModal({
                 children: (
                   <Card size="small" style={{ marginTop: 8 }}>
                     <Space orientation="vertical" style={{ width: "100%" }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: 8,
-                          alignItems: "center",
-                        }}
-                      >
-                        <Input
-                          placeholder={t("mcpConfig.addServer.namePlaceholder")}
-                          value={newServerName}
-                          onChange={(e) => setNewServerName(e.target.value)}
-                          style={{ flex: 1 }}
-                          maxLength={20}
-                          disabled={actionsLocked || addingServer}
-                        />
-                        <Input
-                          placeholder={t("mcpConfig.addServer.urlPlaceholder")}
-                          value={newServerUrl}
-                          onChange={(e) => setNewServerUrl(e.target.value)}
-                          style={{ flex: 2 }}
-                          disabled={actionsLocked || addingServer}
-                        />
-                        <Button
-                          type="primary"
-                          onClick={onAddServer}
-                          loading={addingServer || updatingTools}
-                          icon={
-                            addingServer || updatingTools ? (
-                              <LoaderCircle
-                                className="animate-spin"
-                                style={{ width: 16, height: 16 }}
-                              />
-                            ) : (
-                              <Plus style={{ width: 16, height: 16 }} />
-                            )
-                          }
-                          disabled={actionsLocked}
+                      <Space direction="vertical" style={{ width: "100%" }} size="small">
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                          }}
                         >
-                          {updatingTools
-                            ? t("mcpConfig.addServer.button.updating")
-                            : t("mcpConfig.addServer.button.add")}
-                        </Button>
-                      </div>
+                          <Input
+                            placeholder={t("mcpConfig.addServer.namePlaceholder")}
+                            value={newServerName}
+                            onChange={(e) => setNewServerName(e.target.value)}
+                            style={{ flex: 0.8 }}
+                            maxLength={20}
+                            disabled={actionsLocked || addingServer}
+                          />
+                          <Input
+                            placeholder={t("mcpConfig.addServer.urlPlaceholder")}
+                            value={newServerUrl}
+                            onChange={(e) => setNewServerUrl(e.target.value)}
+                            style={{ flex: 3 }}
+                            disabled={actionsLocked || addingServer}
+                          />
+                        </div>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                          }}
+                        >
+                          <Input.Password
+                            placeholder={t("mcpConfig.editServer.authorizationTokenPlaceholder")}
+                            value={newServerAuthorizationToken}
+                            onChange={(e) => setNewServerAuthorizationToken(e.target.value)}
+                            disabled={actionsLocked || addingServer}
+                            style={{ flex: 1 }}
+                          />
+                          <Button
+                            type="primary"
+                            onClick={onAddServer}
+                            loading={addingServer || updatingTools}
+                            icon={
+                              addingServer || updatingTools ? (
+                                <LoaderCircle
+                                  className="animate-spin"
+                                  style={{ width: 16, height: 16 }}
+                                />
+                              ) : (
+                                <Plus style={{ width: 16, height: 16 }} />
+                              )
+                            }
+                            disabled={actionsLocked}
+                          >
+                            {updatingTools
+                              ? t("mcpConfig.addServer.button.updating")
+                              : t("mcpConfig.addServer.button.add")}
+                          </Button>
+                        </div>
+                      </Space>
                     </Space>
                   </Card>
                 ),
@@ -864,6 +1057,23 @@ export default function McpConfigModal({
                                 style={{ flex: 1 }}
                                 disabled={actionsLocked}
                               />
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                alignItems: "center",
+                              }}
+                            >
+                              <Input.Password
+                                placeholder={t("mcpConfig.editServer.authorizationTokenPlaceholder")}
+                                value={uploadAuthorizationToken}
+                                onChange={(e) =>
+                                  setUploadAuthorizationToken(e.target.value)
+                                }
+                                disabled={actionsLocked}
+                                style={{ flex: 1 }}
+                              />
                               <Button
                                 type="primary"
                                 onClick={onUploadImage}
@@ -891,6 +1101,65 @@ export default function McpConfigModal({
                     },
                   ]
                 : []),
+              {
+                key: "openapi",
+                label: (
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <Import style={{ width: 16, height: 16 }} />
+                    {t("mcpConfig.openApiToMcp.title")}
+                  </span>
+                ),
+                children: (
+                  <Card size="small" style={{ marginTop: 8 }}>
+                    <Space direction="vertical" style={{ width: "100%" }} size="middle">
+                      <div>
+                        <Input.TextArea
+                          placeholder={t("mcpConfig.openApiToMcp.jsonPlaceholder")}
+                          value={openApiJson}
+                          onChange={(e) => setOpenApiJson(e.target.value)}
+                          rows={6}
+                          disabled={actionsLocked || importingOpenApi}
+                          style={{ fontFamily: "monospace", fontSize: 12 }}
+                        />
+                      </div>
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "flex-end",
+                          gap: 8,
+                        }}
+                      >
+                        <Button
+                          type="primary"
+                          onClick={onImportOpenApi}
+                          loading={importingOpenApi || updatingTools}
+                          icon={
+                            importingOpenApi || updatingTools ? (
+                              <LoaderCircle
+                                className="animate-spin"
+                                size={16}
+                              />
+                            ) : (
+                              <Plus className="size-4" />
+                            )
+                          }
+                          disabled={actionsLocked}
+                        >
+                          {updatingTools
+                            ? t("mcpConfig.openApiToMcp.button.adding")
+                            : t("mcpConfig.openApiToMcp.button.add")}
+                        </Button>
+                      </div>
+                    </Space>
+                  </Card>
+                ),
+              },
             ]}
           />
 
@@ -949,6 +1218,30 @@ export default function McpConfigModal({
               style={{ width: "100%" }}
             />
           </div>
+
+          {/* Outer API Tools list */}
+          <div>
+            <div
+              style={{
+                marginBottom: 12,
+              }}
+            >
+              <Title level={5} style={{ margin: 0 }}>
+                {t("mcpConfig.openApiToMcp.toolList.title")}
+              </Title>
+            </div>
+            <Table
+              columns={outerApiToolsColumns}
+              dataSource={outerApiTools}
+              rowKey="id"
+              loading={loadingOuterApiTools}
+              size="small"
+              pagination={false}
+              locale={{ emptyText: t("mcpConfig.openApiToMcp.toolList.empty") }}
+              scroll={{ y: 300 }}
+              style={{ width: "100%" }}
+            />
+          </div>
         </div>
       </Modal>
 
@@ -964,20 +1257,23 @@ export default function McpConfigModal({
       {/* Edit server modal */}
       <McpEditServerModal
         open={editServerModalVisible}
-        onCancel={() => setEditServerModalVisible(false)}
+        onCancel={() => {
+          setEditServerModalVisible(false);
+          setEditingServer(null);
+        }}
         onSave={onSaveEditedServer}
         initialName={editingServer?.service_name || ""}
         initialUrl={editingServer?.mcp_url || ""}
-        loading={updatingServer}
+        initialAuthorizationToken={editingServer?.authorization_token || null}
+        loading={updatingServer || loadingMcpRecord}
       />
 
       {/* Container logs modal */}
       <McpContainerLogsModal
         open={logsModalVisible}
         onCancel={() => setLogsModalVisible(false)}
-        loading={loadingLogs}
-        logs={currentContainerLogs}
         containerId={currentContainerId}
+        tail={500}
       />
     </>
   );

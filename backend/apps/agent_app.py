@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Header, HTTPException, Request, Query
 from fastapi.encoders import jsonable_encoder
 from starlette.responses import JSONResponse
 
-from consts.model import AgentRequest, AgentInfoRequest, AgentIDRequest, ConversationResponse, AgentImportRequest, AgentNameBatchCheckRequest, AgentNameBatchRegenerateRequest, VersionPublishRequest, VersionListResponse, VersionDetailResponse, VersionRollbackRequest, VersionStatusRequest, CurrentVersionResponse, VersionCompareRequest
+from consts.model import AgentRequest, AgentInfoRequest, AgentIDRequest, ConversationResponse, AgentImportRequest, AgentNameBatchCheckRequest, AgentNameBatchRegenerateRequest, VersionPublishRequest, VersionListResponse, VersionDetailResponse, VersionRollbackRequest, VersionStatusRequest, CurrentVersionResponse, VersionCompareRequest, VersionUpdateRequest
 from services.agent_service import (
     get_agent_info_impl,
     get_creating_sub_agent_info_impl,
@@ -20,7 +20,8 @@ from services.agent_service import (
     run_agent_stream,
     stop_agent_tasks,
     get_agent_call_relationship_impl,
-    clear_agent_new_mark_impl
+    clear_agent_new_mark_impl,
+    get_agent_by_name_impl,
 )
 from services.agent_version_service import (
     publish_version_impl,
@@ -29,6 +30,7 @@ from services.agent_version_service import (
     get_version_detail_impl,
     rollback_version_impl,
     update_version_status_impl,
+    update_version_impl,
     delete_version_impl,
     get_current_version_impl,
     compare_versions_impl,
@@ -97,6 +99,27 @@ async def search_agent_info_api(
         logger.error(f"Agent search info error: {str(e)}")
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Agent search info error.")
+
+
+@agent_config_router.get("/by-name/{agent_name}")
+async def get_agent_by_name_api(
+    agent_name: str,
+    tenant_id: Optional[str] = Query(
+        None, description="Tenant ID for filtering (uses auth if not provided)"),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Look up an agent by name and return its agent_id and highest published version_no.
+    """
+    try:
+        _, auth_tenant_id = get_current_user_id(authorization)
+        effective_tenant_id = tenant_id or auth_tenant_id
+        result = get_agent_by_name_impl(agent_name, effective_tenant_id)
+        return JSONResponse(status_code=HTTPStatus.OK, content=result)
+    except Exception as e:
+        logger.error(f"Agent by name lookup error: {str(e)}")
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Agent not found.")
 
 
 @agent_config_router.get("/get_creating_sub_agent_id")
@@ -282,6 +305,7 @@ async def publish_version_api(
             user_id=user_id,
             version_name=request.version_name,
             release_note=request.release_note,
+            publish_as_a2a=request.publish_as_a2a,
         )
         return JSONResponse(status_code=HTTPStatus.OK, content=result)
     except ValueError as e:
@@ -441,6 +465,34 @@ async def update_version_status_api(
     except Exception as e:
         logger.error(f"Update version status error: {str(e)}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Update version status error.")
+
+
+@agent_config_router.put("/{agent_id}/versions/{version_no}")
+async def update_version_api(
+    agent_id: int,
+    version_no: int,
+    request: VersionUpdateRequest,
+    authorization: str = Header(None),
+):
+    """
+    Update version metadata (version_name and release_note)
+    """
+    try:
+        user_id, tenant_id = get_current_user_id(authorization)
+        result = update_version_impl(
+            agent_id=agent_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            version_no=version_no,
+            version_name=request.version_name,
+            release_note=request.release_note,
+        )
+        return JSONResponse(status_code=HTTPStatus.OK, content=result)
+    except ValueError as e:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Update version error: {str(e)}")
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR, detail="Update version error.")
 
 
 @agent_config_router.delete("/{agent_id}/versions/{version_no}")

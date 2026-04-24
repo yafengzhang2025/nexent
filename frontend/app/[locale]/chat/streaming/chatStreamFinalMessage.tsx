@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Copy,
@@ -11,6 +11,22 @@ import {
 } from "lucide-react";
 
 import { MarkdownRenderer } from "@/components/ui/markdownRenderer";
+
+/**
+ * Convert custom code tags to standard markdown code fences
+ * - <code>...</code> → ```python ... ```
+ * - <DISPLAY:language>...</DISPLAY> → ```language ... ```
+ */
+const convertToMarkdownCodeFences = (content: string): string => {
+  // Handle complete blocks
+  content = content.replace(/<DISPLAY:(\w+)>([\s\S]*?)<\/DISPLAY>/g, (_match, language, code) => {
+    return `\`\`\`${language}\n${code.trim()}\n\`\`\``;
+  });
+  content = content.replace(/<code>([\s\S]*?)<\/code>/g, (_match, code) => {
+    return `\`\`\`python\n${code.trim()}\n\`\`\``;
+  });
+  return content;
+};
 import { Button } from "antd";
 import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { ChatMessageType } from "@/types/chat";
@@ -20,7 +36,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import log from "@/lib/logger";
 import { AttachmentItem } from "@/types/chat";
 import { MESSAGE_ROLES } from "@/const/chatConfig";
-import { ChatAttachment } from "../internal/chatAttachment";
+import { ChatAttachment } from "../components/chatAttachment";
 
 interface FinalMessageProps {
   message: ChatMessageType;
@@ -39,7 +55,7 @@ interface FinalMessageProps {
 // TTS playback status
 type TTSStatus = typeof chatConfig.ttsStatus[keyof typeof chatConfig.ttsStatus];
 
-export function ChatStreamFinalMessage({
+function ChatStreamFinalMessageInner({
   message,
   onSelectMessage,
   isSelected = false,
@@ -270,7 +286,7 @@ export function ChatStreamFinalMessage({
           (message.finalAnswer || message.content !== undefined) && (
             <div className="bg-white rounded-lg w-full -mt-2">
               <MarkdownRenderer
-                content={message.finalAnswer || message.content || ""}
+                content={convertToMarkdownCodeFences(message.finalAnswer || message.content || "")}
                 searchResults={message?.searchResults}
                 onCitationHover={onCitationHover}
                 // For historical messages, content already represents the final answer
@@ -411,3 +427,20 @@ export function ChatStreamFinalMessage({
     </div>
   );
 }
+
+function areEqualFinalMessage(prev: FinalMessageProps, next: FinalMessageProps): boolean {
+  return (
+    // Message object reference covers content, finalAnswer, isComplete, opinion_flag, attachments, etc.
+    prev.message === next.message &&
+    prev.isSelected === next.isSelected &&
+    prev.searchResultsCount === next.searchResultsCount &&
+    prev.imagesCount === next.imagesCount &&
+    prev.hideButtons === next.hideButtons &&
+    prev.index === next.index &&
+    prev.currentConversationId === next.currentConversationId
+    // Callbacks (onSelectMessage, onOpinionChange, onCitationHover, onImageClick) are intentionally
+    // excluded: they do not affect rendered output and will be stabilized with useCallback (Phase 1.2).
+  );
+}
+
+export const ChatStreamFinalMessage = React.memo(ChatStreamFinalMessageInner, areEqualFinalMessage);

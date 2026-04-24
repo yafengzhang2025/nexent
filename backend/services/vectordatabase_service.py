@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import Body, Depends, Path, Query
 from fastapi.responses import StreamingResponse
 from nexent.core.models.embedding_model import OpenAICompatibleEmbedding, JinaEmbedding, BaseEmbedding
+from nexent.core.models.rerank_model import OpenAICompatibleRerank, BaseRerank
 from nexent.vector_database.base import VectorDatabaseCore
 from nexent.vector_database.elasticsearch_core import ElasticSearchCore
 from nexent.vector_database.datamate_core import DataMateCore
@@ -146,7 +147,7 @@ def _rethrow_or_plain(exc: Exception) -> None:
     raise Exception(msg)
 
 
-def check_knowledge_base_exist_impl(knowledge_name: str, vdb_core: VectorDatabaseCore, user_id: str, tenant_id: str) -> dict:
+def check_knowledge_base_exist_impl(knowledge_name: str, vdb_core: VectorDatabaseCore, user_id: str, tenant_id: str, exclude_index_name: Optional[str] = None) -> dict:
     """
     Check knowledge base existence and handle orphan cases
 
@@ -155,6 +156,7 @@ def check_knowledge_base_exist_impl(knowledge_name: str, vdb_core: VectorDatabas
         vdb_core: Elasticsearch core instance
         user_id: Current user ID
         tenant_id: Current tenant ID
+        exclude_index_name: Optional index name to exclude from the check (used when updating an existing knowledge base)
 
     Returns:
         dict: Status information about the knowledge base
@@ -165,6 +167,9 @@ def check_knowledge_base_exist_impl(knowledge_name: str, vdb_core: VectorDatabas
 
     # Case A: Knowledge base name already exists in the same tenant
     if pg_record:
+        # If we're excluding a specific index and this is the one we found, consider it available
+        if exclude_index_name and pg_record.get("index_name") == exclude_index_name:
+            return {"status": "available"}
         return {"status": "exists_in_tenant"}
 
     # Case B: Name is available in this tenant
@@ -231,6 +236,52 @@ def get_embedding_model(tenant_id: str, model_name: Optional[str] = None):
             base_url=model_config.get("base_url", ""),
             model_name=get_model_name_from_config(model_config) or "",
             embedding_dim=model_config.get("max_tokens", 1024),
+            ssl_verify=model_config.get("ssl_verify", True),
+        )
+    else:
+        return None
+
+
+def get_rerank_model(tenant_id: str, model_name: Optional[str] = None):
+    """
+    Get the rerank model for the tenant, optionally using a specific model name.
+
+    Args:
+        tenant_id: Tenant ID
+        model_name: Optional specific model name to use (format: "model_repo/model_name" or just "model_name")
+                   If provided, will try to find the model in the tenant's model list.
+
+    Returns:
+        Rerank model instance or None
+    """
+    # If model_name is provided, try to find it in the tenant's models
+    if model_name:
+        try:
+            models = get_model_records({"model_type": "rerank"}, tenant_id)
+            for model in models:
+                model_display_name = model.get("model_repo") + "/" + model["model_name"] if model.get("model_repo") else model["model_name"]
+                if model_display_name == model_name:
+                    # Found the model, create rerank model instance
+                    return OpenAICompatibleRerank(
+                        model_name=get_model_name_from_config(model) or "",
+                        base_url=model.get("base_url", ""),
+                        api_key=model.get("api_key", ""),
+                        ssl_verify=model.get("ssl_verify", True),
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to get rerank model by name {model_name}: {e}")
+
+    # Fall back to default rerank model
+    model_config = tenant_config_manager.get_model_config(
+        key="RERANK_ID", tenant_id=tenant_id)
+
+    model_type = model_config.get("model_type", "")
+
+    if model_type == "rerank":
+        return OpenAICompatibleRerank(
+            model_name=get_model_name_from_config(model_config) or "",
+            base_url=model_config.get("base_url", ""),
+            api_key=model_config.get("api_key", ""),
             ssl_verify=model_config.get("ssl_verify", True),
         )
     else:
@@ -391,6 +442,7 @@ class ElasticSearchService:
             tenant_id: Optional[str],
             ingroup_permission: Optional[str] = None,
             group_ids: Optional[List[int]] = None,
+            embedding_model_name: Optional[str] = None,
     ):
         """
         Create a new knowledge base with a user-facing name and an internal Elasticsearch index name.
@@ -400,11 +452,29 @@ class ElasticSearchService:
         - Generate index_name as ``knowledge_id + '-' + uuid`` (digits and lowercase letters only).
         - Use generated index_name as the Elasticsearch index name.
 
+        Args:
+            knowledge_name: User-facing knowledge base name
+            embedding_dim: Dimension of the embedding vectors (optional)
+            vdb_core: VectorDatabaseCore instance
+            user_id: User ID who creates the knowledge base
+            tenant_id: Tenant ID
+            ingroup_permission: Permission level (optional)
+            group_ids: List of group IDs (optional)
+            embedding_model_name: Specific embedding model name to use (optional).
+                                   If provided, will use this model instead of tenant default.
+
         For backward compatibility, legacy callers can still use create_index() directly
         with an explicit index_name.
         """
         try:
-            embedding_model = get_embedding_model(tenant_id)
+            # Get embedding model - use user-selected model if provided, otherwise use tenant default
+            embedding_model = get_embedding_model(tenant_id, embedding_model_name)
+
+            # Determine the embedding model name to save: use user-provided name if available,
+            # otherwise use the model's display name
+            saved_embedding_model_name = embedding_model_name
+            if not saved_embedding_model_name and embedding_model:
+                saved_embedding_model_name = embedding_model.model
 
             # Create knowledge record first to obtain knowledge_id and generated index_name
             knowledge_data = {
@@ -412,7 +482,7 @@ class ElasticSearchService:
                 "knowledge_describe": "",
                 "user_id": user_id,
                 "tenant_id": tenant_id,
-                "embedding_model_name": embedding_model.model if embedding_model else None,
+                "embedding_model_name": saved_embedding_model_name,
             }
 
             # Add group permission and group IDs if provided
@@ -1228,7 +1298,6 @@ class ElasticSearchService:
                 summarize_clusters_map_reduce,
                 merge_cluster_summaries
             )
-
             # Use new Map-Reduce approach
             # Sample reasonable number of documents
             sample_count = min(batch_size // 5, 200)
@@ -1560,7 +1629,7 @@ class ElasticSearchService:
                 base_fields={
                     **update_fields,
                     "updated_by": user_id,
-                    "update_time": datetime.utcnow().strftime(
+                    "update_time": datetime.now(timezone.utc).strftime(
                         "%Y-%m-%dT%H:%M:%S"),
                 },
                 metadata=metadata,
@@ -1692,7 +1761,7 @@ class ElasticSearchService:
                     payload[key] = value
 
         if ensure_create_time and "create_time" not in payload:
-            payload["create_time"] = datetime.utcnow().strftime(
+            payload["create_time"] = datetime.now(timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%S")
 
         return payload
