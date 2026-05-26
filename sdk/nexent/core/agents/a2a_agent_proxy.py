@@ -6,6 +6,7 @@ It provides a unified interface for invoking remote A2A endpoints.
 """
 import json
 import logging
+import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional
 from dataclasses import dataclass
 from threading import Event
@@ -115,6 +116,7 @@ class ExternalA2AAgentProxy:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "A2A-Version": "1.0",
         }
         if self.agent_info.api_key:
             headers["Authorization"] = f"Bearer {self.agent_info.api_key}"
@@ -137,6 +139,7 @@ class ExternalA2AAgentProxy:
             A2A message payload dict.
         """
         message = {
+            "message_id": f"msg_{uuid.uuid4().hex}",
             "role": "ROLE_USER",
             "parts": [{"text": query}]
         }
@@ -397,7 +400,7 @@ class ExternalA2AAgentProxy:
         for msg in messages:
             if msg.get("role") == "ROLE_AGENT":
                 for part in msg.get("parts", []):
-                    if part.get("type") == "text" and part.get("text"):
+                    if part.get("text"):
                         return part["text"]
         return None
 
@@ -409,7 +412,7 @@ class ExternalA2AAgentProxy:
             return None
         if isinstance(message, dict):
             for part in message.get("parts", []):
-                if part.get("type") == "text" and part.get("text"):
+                if part.get("text"):
                     return part["text"]
         return str(message)
 
@@ -417,11 +420,11 @@ class ExternalA2AAgentProxy:
         """Extract text from a message object (common in JSON-RPC responses).
 
         A2A JSON-RPC Message response:
-            {"messageId": "...", "role": "ROLE_AGENT", "parts": [{"type": "text", "text": "...", "mediaType": "..."}]}
+            {"messageId": "...", "role": "ROLE_AGENT", "parts": [{"text": "...", "mediaType": "..."}]}
         """
         if message_obj.get("role") == "ROLE_AGENT":
             for part in message_obj.get("parts", []):
-                if part.get("type") == "text" and part.get("text"):
+                if part.get("text"):
                     return part["text"]
         return None
 
@@ -462,7 +465,7 @@ class ExternalA2AAgentProxy:
     def _extract_text_from_parts(self, parts: List[Dict[str, Any]], accumulated: List[str]) -> Optional[str]:
         """Extract text from parts list, appending only new text to accumulated list."""
         for part in parts:
-            if part.get("type") == "text" and part.get("text"):
+            if part.get("text"):
                 text = part["text"]
                 if text and text not in accumulated:
                     accumulated.append(text)

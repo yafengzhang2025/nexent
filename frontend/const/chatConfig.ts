@@ -9,6 +9,7 @@ export const chatConfig = {
     "application/json",
     "application/xml",
     "text/markdown",
+    "text/csv",
   ],
 
   // Supported text file extensions
@@ -36,10 +37,10 @@ export const chatConfig = {
   imageExtensions: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"],
   
   // Supported document file extensions
-  documentExtensions: ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"],
+  documentExtensions: ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "epub", "html", "xml"],
   
   // Supported text document extensions
-  supportedTextExtensions: ["md", "markdown", "txt"],
+  supportedTextExtensions: ["md", "markdown", "txt", "csv", "json"],
 
   // File icon mapping configuration
   fileIcons: {
@@ -50,7 +51,7 @@ export const chatConfig = {
     word: ["doc", "docx"],
     
     // Plain text files
-    text: ["txt"],
+    text: ["txt", "epub"],
     
     // Markdown files
     markdown: ["md"],
@@ -62,7 +63,7 @@ export const chatConfig = {
     powerpoint: ["ppt", "pptx"],
     
     // HTML files
-    html: ["html", "htm"],
+    html: ["html", "htm", "xml"],
     
     // Code files
     code: ["css", "js", "ts", "jsx", "tsx", "php", "py", "java", "c", "cpp", "cs"],
@@ -103,6 +104,7 @@ messageTypes: {
   ERROR: "error" as const,
   STEP_COUNT: "step_count" as const,
   TOKEN_COUNT: "token_count" as const,
+  MAX_STEPS_REACHED: "max_steps_reached" as const,
   SEARCH_CONTENT_PLACEHOLDER: "search_content_placeholder" as const,
   VIRTUAL: "virtual" as const,
   PREPROCESS: "preprocess" as const,

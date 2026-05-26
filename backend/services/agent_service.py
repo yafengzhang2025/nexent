@@ -46,6 +46,7 @@ from database.agent_db import (
     update_related_agents,
     clear_agent_new_mark
 )
+from database import a2a_agent_db
 from database.model_management_db import get_model_by_model_id, get_model_id_by_display_name
 from database.remote_mcp_db import get_mcp_server_by_name_and_tenant
 from database.tool_db import (
@@ -72,6 +73,9 @@ from utils.memory_utils import build_memory_config
 from utils.thread_utils import submit
 from utils.prompt_template_utils import get_prompt_generate_prompt_template
 from utils.llm_utils import call_llm_for_system_prompt
+
+# Monitoring utilities: expose monitoring context for downstream observers
+from nexent.monitor import set_monitoring_context
 
 # Import monitoring utilities
 from utils.monitoring import monitoring_manager
@@ -964,6 +968,49 @@ async def update_agent_info_impl(request: AgentInfoRequest, authorization: str =
         logger.error(f"Failed to update related agents: {str(e)}")
         raise ValueError(f"Failed to update related agents: {str(e)}")
 
+    # Handle related external agents saving when provided
+    try:
+        if request.related_external_agent_ids is not None and agent_id is not None:
+            related_external_agent_ids = request.related_external_agent_ids
+            # Query current relations
+            current_relations = a2a_agent_db.list_external_relations_by_local_agent(
+                local_agent_id=agent_id,
+                tenant_id=tenant_id
+            )
+            current_external_ids = {
+                rel["external_agent_id"] for rel in current_relations
+            }
+            new_external_ids = set(related_external_agent_ids) if related_external_agent_ids else set()
+
+            # Find IDs to delete (in current but not in new)
+            ids_to_delete = current_external_ids - new_external_ids
+            # Find IDs to add (in new but not in current)
+            ids_to_add = new_external_ids - current_external_ids
+
+            # Soft delete removed relations
+            for ext_agent_id in ids_to_delete:
+                a2a_agent_db.remove_external_agent_relation(
+                    local_agent_id=agent_id,
+                    external_agent_id=ext_agent_id,
+                    tenant_id=tenant_id
+                )
+
+            # Add new relations
+            for ext_agent_id in ids_to_add:
+                try:
+                    a2a_agent_db.add_external_agent_relation(
+                        local_agent_id=agent_id,
+                        external_agent_id=ext_agent_id,
+                        tenant_id=tenant_id,
+                        user_id=user_id
+                    )
+                except ValueError:
+                    # Relation already exists, skip
+                    pass
+    except Exception as e:
+        logger.error(f"Failed to update related external agents: {str(e)}")
+        raise ValueError(f"Failed to update related external agents: {str(e)}")
+
     return {"agent_id": agent_id}
 
 
@@ -1637,7 +1684,20 @@ async def prepare_agent_run(
         language=language,
         allow_memory_search=allow_memory_search,
         is_debug=agent_request.is_debug,
+        override_version_no=agent_request.version_no,
+        override_model_id=agent_request.model_id,
     )
+
+    # Mount conversation-level reusable ContextManager if enabled
+    cm_config = getattr(agent_run_info.agent_config, 'context_manager_config', None)
+    if cm_config and cm_config.enabled:
+        cm = agent_run_manager.get_or_create_context_manager(
+            conversation_id=str(agent_request.conversation_id),
+            config=cm_config,
+            max_steps=agent_run_info.agent_config.max_steps
+        )
+        agent_run_info.context_manager = cm
+
     agent_run_manager.register_agent_run(
         agent_request.conversation_id, agent_run_info, user_id)
     return agent_run_info, memory_context
@@ -1658,6 +1718,9 @@ def save_messages(agent_request, target: str, user_id: str, tenant_id: str, mess
 
 
 # Helper function for run_agent_stream, used to generate stream response with memory preprocess tokens
+@monitoring_manager.monitor_endpoint(
+    "agent_service.generate_stream_with_memory", exclude_params=["authorization"]
+)
 async def generate_stream_with_memory(
     agent_request: AgentRequest,
     user_id: str,
@@ -1849,6 +1912,13 @@ async def run_agent_stream(
         language=language,
         user_resolution_duration=resolve_duration
     )
+    # Expose resolved identity to downstream monitoring (LLM-level record writing)
+    set_monitoring_context(
+        tenant_id=resolved_tenant_id,
+        user_id=resolved_user_id,
+        agent_id=agent_request.agent_id,
+        conversation_id=agent_request.conversation_id,
+    )
 
     # Step 2: Save user message (if needed)
     if not agent_request.is_debug and not skip_user_save:
@@ -1990,8 +2060,8 @@ def stop_agent_tasks(conversation_id: int, user_id: str):
         return {"status": "success", "message": message}
     else:
         message = f"no running agent or preprocess tasks found for user_id {user_id}, conversation_id {conversation_id}"
-        logging.error(message)
-        return {"status": "error", "message": message}
+        logging.info(message)
+        return {"status": "success", "message": message, "already_stopped": True}
 
 
 async def get_agent_id_by_name(agent_name: str, tenant_id: str) -> int:

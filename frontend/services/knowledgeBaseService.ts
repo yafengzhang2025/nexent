@@ -350,6 +350,63 @@ class KnowledgeBaseService {
     }
   }
 
+  /**
+   * Fetch Haotian knowledge sets via backend proxy.
+   */
+  async getHaotianKnowledgeSets(listUrl: string, externalAuthorization: string): Promise<{
+    knowledge_sets: Array<{
+      name: string;
+      knowledge_bases: Array<{ dify_dataset_id: string; name: string }>;
+    }>;
+  }> {
+    const response = await fetch(API_ENDPOINTS.haotian.knowledgeSets, {
+      method: "POST",
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        list_url: listUrl,
+        authorization: externalAuthorization,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "Failed to fetch Haotian knowledge sets");
+    }
+    return data;
+  }
+
+  /**
+   * Test Haotian connection via backend proxy.
+   */
+  async testHaotianConnection(listUrl: string, externalAuthorization: string): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    try {
+      const response = await fetch(API_ENDPOINTS.haotian.testConnection, {
+        method: "POST",
+        headers: {
+          ...getAuthHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          list_url: listUrl,
+          authorization: externalAuthorization,
+        }),
+      });
+      if (response.ok) return { success: true };
+      const errorData = await response.json();
+      return { success: false, error: errorData.detail || "Connection failed" };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Connection test failed",
+      };
+    }
+  }
+
   // Sync Dify knowledge bases
   async syncDifyDatasets(
     difyApiBase: string,
@@ -476,6 +533,7 @@ class KnowledgeBaseService {
                   return {
                     id: kbId,
                     name: kbName,
+                    index_name: kbId, // Internal index_name for API calls
                     display_name: indexInfo.display_name || indexInfo.name,
                     description: "Elasticsearch index",
                     documentCount: stats.doc_count || 0,
@@ -487,7 +545,10 @@ class KnowledgeBaseService {
                       stats.update_date ||
                       stats.creation_date ||
                       null,
-                    embeddingModel: stats.embedding_model || "unknown",
+                    // Use embedding_model_name (display_name) from backend, fallback to ES stats
+                    embeddingModel: indexInfo.embedding_model_name || stats.embedding_model || "unknown",
+                    summaryFrequency: indexInfo.summary_frequency || null,
+                    lastSummaryTime: indexInfo.last_summary_time || null,
                     knowledge_sources:
                       indexInfo.knowledge_sources || "elasticsearch",
                     ingroup_permission: indexInfo.ingroup_permission || "",
@@ -1066,6 +1127,39 @@ class KnowledgeBaseService {
     }
   }
 
+  // Update auto-summary frequency for a knowledge base
+  async updateSummaryFrequency(
+    indexName: string,
+    frequency: string | null
+  ): Promise<void> {
+    try {
+      const response = await fetch(
+        API_ENDPOINTS.knowledgeBase.updateSummaryFrequency(indexName),
+        {
+          method: "PATCH",
+          headers: {
+            ...getAuthHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ summary_frequency: frequency }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+            data.message ||
+            `HTTP error! status: ${response.status}`
+        );
+      }
+    } catch (error) {
+      log.error("Error updating summary frequency:", error);
+      throw error;
+    }
+  }
+
   // Get knowledge base summary
   async getSummary(indexName: string): Promise<string> {
     try {
@@ -1406,6 +1500,99 @@ class KnowledgeBaseService {
     } catch (error) {
       log.error("Failed to get document error info:", error);
       throw error;
+    }
+  }
+
+  // Embedding model status and configuration
+  async getEmbeddingModelStatus(
+    indexName: string
+  ): Promise<{
+    status: "configured" | "legacy" | "missing";
+    needs_config: boolean;
+    index_name: string;
+    knowledge_name: string;
+    model_id: string | null;
+    embedding_model_name: string | null;
+    model_info: {
+      model_id: string;
+      model_name: string;
+      display_name: string;
+      model_type: string;
+    } | null;
+    message: string;
+  }> {
+    try {
+      const response = await fetch(
+        API_ENDPOINTS.knowledgeBase.embeddingModelStatus(indexName),
+        {
+          headers: getAuthHeaders(),
+        }
+      );
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new ApiError(
+          response.status,
+          errorData.detail || errorData.message || "Failed to get embedding model status"
+        );
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      log.error("Failed to get embedding model status:", error);
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error("Failed to get embedding model status");
+    }
+  }
+
+  async updateEmbeddingModel(
+    indexName: string,
+    modelId: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    try {
+      const response = await fetch(
+        API_ENDPOINTS.knowledgeBase.updateEmbeddingModel(indexName),
+        {
+          method: "PUT",
+          headers: {
+            ...getAuthHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ model_id: modelId }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new ApiError(
+          response.status,
+          data.detail || data.message || "Failed to update embedding model"
+        );
+      }
+
+      return {
+        success: true,
+        message: data.message || "Embedding model updated successfully",
+      };
+    } catch (error) {
+      log.error("Failed to update embedding model:", error);
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error("Failed to update embedding model");
     }
   }
 }
