@@ -7,6 +7,7 @@ import os
 import sys
 import shutil
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch as _patch
@@ -41,6 +42,47 @@ if _sdk_dir not in sys.path:
 
 sys.modules.update({k: v for k, v in _mem0_stubs.items() if k not in sys.modules})
 sys.modules.update({k: v for k, v in _optional_sdk_stubs.items() if k not in sys.modules})
+
+# Stub xlrd — only required when tests exercise ``evaluation_set_excel_utils``
+# in environments where the optional SDK is not installed.  We register a
+# permissive module-like object that exposes ``open_workbook`` so the .xls
+# parsing path can be imported without raising.  Individual test files
+# (e.g. ``test_evaluation_set_excel_utils.py``) replace this with a richer
+# fake that mimics the sheet-level API for the .xls tests.
+class _XlrdProxy(types.ModuleType):
+    """Permissive xlrd stub.
+
+    Exposes a callable ``open_workbook`` attribute so that ``xlrd.open_workbook(...)``
+    works at import time.  Returns a shape that satisfies the bits of the .xls
+    parsing path used by ``evaluation_set_excel_utils`` well enough to import
+    without crashing; richer behaviour is supplied by per-test-file overrides.
+    """
+
+    def __init__(self):
+        super().__init__("xlrd")
+        self._sentinel = object()
+
+    def open_workbook(self, file_contents=b""):
+        # Return a fully-formed stub book that survives ``sheet_by_index``,
+        # ``sheet.nrows``, ``sheet.row_values`` and ``sheet.cell_value`` —
+        # these are the four accessors used in the .xls branch.
+        class _Sheet:
+            nrows = 0
+            def row_values(self, _rowx):
+                return []
+
+            def cell_value(self, _rowx, _colx):
+                return None
+
+        class _Book:
+            def sheet_by_index(self, _idx):
+                return _Sheet()
+
+        return _Book()
+
+
+if "xlrd" not in sys.modules or not hasattr(sys.modules["xlrd"], "open_workbook"):
+    sys.modules["xlrd"] = _XlrdProxy()
 
 _tmp_root = os.path.abspath(os.path.join(_test_root, "..", ".pytest-tmp"))
 os.makedirs(_tmp_root, exist_ok=True)
@@ -115,3 +157,69 @@ def tmp_path():
         yield path
     finally:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def install_supabase_mock():
+    """Install a structured supabase package mock into ``sys.modules``.
+
+    ``backend.utils.auth_utils`` imports ``from supabase.lib.client_options
+    import SyncClientOptions`` at module load time. Test files that simply
+    replace ``sys.modules['supabase']`` with a bare ``MagicMock`` cause that
+    import to fail (the mock has no ``.lib.client_options`` attribute),
+    which in turn makes every test that transitively imports ``auth_utils``
+    (for example anything that imports ``services.user_service``) fail
+    during collection.
+
+    This helper installs a package-like mock that exposes the attributes
+    used by the production code paths we exercise in unit tests, while
+    still letting tests override individual functions via ``monkeypatch``
+    or ``patch``.
+    """
+    supabase_mock = MagicMock()
+    supabase_mock.create_client = MagicMock()
+
+    supabase_lib_mock = types.ModuleType("supabase.lib")
+    supabase_client_options_mock = types.ModuleType(
+        "supabase.lib.client_options"
+    )
+
+    class _SyncClientOptions:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    supabase_client_options_mock.SyncClientOptions = _SyncClientOptions
+    supabase_lib_mock.client_options = supabase_client_options_mock
+    supabase_mock.lib = supabase_lib_mock
+
+    sys.modules['supabase'] = supabase_mock
+    sys.modules['supabase.lib'] = supabase_lib_mock
+    sys.modules['supabase.lib.client_options'] = supabase_client_options_mock
+
+    return supabase_mock
+
+
+@pytest.fixture(autouse=True)
+def _supabase_mock():
+    """Re-install the supabase mock before each test.
+
+    Module-level ``sys.modules['supabase']`` overrides in test files
+    (e.g. ``sys.modules['supabase'] = MagicMock()``) strip out the
+    structured attributes (``lib``, ``lib.client_options``,
+    ``SyncClientOptions``) that ``backend.utils.auth_utils`` resolves at
+    import time. The module-level install below covers collection, but
+    any test that re-mocks ``supabase`` after collection needs the
+    structured attributes re-installed before its test body runs.
+    """
+    install_supabase_mock()
+    yield
+
+
+# Install a sane supabase mock at collection time so test modules that
+# import ``backend.utils.auth_utils`` (directly or transitively) succeed
+# during pytest's collection phase, before any test fixture has had a
+# chance to run. The ``_supabase_mock`` autouse fixture above re-runs the
+# install before each test body in case individual test modules
+# overwrote ``sys.modules['supabase']``.
+if 'supabase' not in sys.modules:
+    install_supabase_mock()

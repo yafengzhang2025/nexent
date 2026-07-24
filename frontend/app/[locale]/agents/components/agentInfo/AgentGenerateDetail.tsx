@@ -14,9 +14,10 @@ import {
   Card,
   App,
   Alert,
+  Tooltip,
 } from "antd";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Zap, Maximize2, Settings2, Sparkles } from "lucide-react";
+import { Zap, Maximize2, Settings2, Sparkles, TriangleAlert } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 
 import {
@@ -33,6 +34,8 @@ import { useAgentGeneration } from "@/hooks/agent/useAgentGeneration";
 import { useAuthorizationContext } from "@/components/providers/AuthorizationProvider";
 import { useDeployment } from "@/components/providers/deploymentProvider";
 import { useModelList } from "@/hooks/model/useModelList";
+import { useCapacityCoverage } from "@/hooks/model/useCapacityCoverage";
+import { canManageModels } from "@/lib/auth";
 import { useConfig } from "@/hooks/useConfig";
 import { useGroupList, useGroupDetails } from "@/hooks/group/useGroupList";
 import { usePromptTemplateList } from "@/hooks/agent/usePromptTemplateList";
@@ -71,6 +74,8 @@ export default function AgentGenerateDetail({}) {
 
   const { defaultLlmModelConfig } = useConfig();
   const { availableLlmModels, models, isLoading: loadingModels } = useModelList();
+  const { bareModelIds: bareCapacityModelIds } = useCapacityCoverage();
+  const userCanManageModels = canManageModels(user?.role, isSpeedMode);
   const {
     templates: promptTemplates,
     isLoading: loadingPromptTemplates,
@@ -100,6 +105,14 @@ export default function AgentGenerateDetail({}) {
 
   // Streaming field values (accumulated from SSE, bypasses Form disabled state)
 
+  // Track form values for modal props (synced after Form mounts / setFieldsValue)
+  const [watchedPromptTemplateId, setWatchedPromptTemplateId] = useState<number | undefined>();
+  const [watchedBusinessDescription, setWatchedBusinessDescription] = useState<string>("");
+  const [watchedBusinessLogicModelId, setWatchedBusinessLogicModelId] = useState<number | undefined>();
+  const [watchedDutyPrompt, setWatchedDutyPrompt] = useState<string>("");
+  const [watchedConstraintPrompt, setWatchedConstraintPrompt] = useState<string>("");
+  const [watchedFewShotsPrompt, setWatchedFewShotsPrompt] = useState<string>("");
+
   // Modal states
   const [expandModalOpen, setExpandModalOpen] = useState(false);
   const [expandModalType, setExpandModalType] = useState<'duty' | 'constraint' | 'few-shots' | null>(null);
@@ -112,13 +125,13 @@ export default function AgentGenerateDetail({}) {
     clearExpiredGenerationCaches();
   }, []);
 
-
   // (e.g. business_description from a previously edited agent)
   useEffect(() => {
-    if (isCreatingMode) {
+    if (!isCreatingMode) return;
+    queueMicrotask(() => {
       form.resetFields();
-    }
-  }, [isCreatingMode]);
+    });
+  }, [isCreatingMode, form]);
 
   // Use agent generation hook
   const { handleGenerateAgent } = useAgentGeneration({
@@ -154,16 +167,60 @@ export default function AgentGenerateDetail({}) {
     }));
   }, [filteredGroups]);
 
+  const selectedMainAgentModel = useMemo(() => {
+    const primaryModelId = editedAgent.model_ids?.[0];
+    return availableLlmModels.find(
+      (model) =>
+        model.id === primaryModelId ||
+        model.displayName === editedAgent.model ||
+        model.name === editedAgent.model
+    );
+  }, [availableLlmModels, editedAgent.model, editedAgent.model_ids]);
+
   // Initialize form values when currentAgentId changes or forceRefreshKey updates
   // Cached generation data is already merged into editedAgent by setCurrentAgent
   useEffect(() => {
+    // Build mainAgentModels array from model_ids (preferred) and resolve display names
+    // against the available LLM list. When model_ids is empty, fall back to deriving
+    // a single model entry from the legacy `model` name (kept for backward compatibility).
+    const modelIds = (editedAgent.model_ids || []).filter((id: unknown) => Number.isFinite(Number(id)));
+    const mainAgentModelIds: number[] = modelIds.map((id: unknown) => Number(id));
+    let mainAgentModels: string[] = mainAgentModelIds
+      .map((id: number) => availableLlmModels.find((m) => m.id === id)?.displayName)
+      .filter(Boolean) as string[];
+
+    // Backward compatibility: if model_ids is empty but a legacy `model` name is present,
+    // try to resolve a matching model to keep the UI populated.
+    if (mainAgentModels.length === 0 && editedAgent.model) {
+      const matched = availableLlmModels.find(
+        (m) => m.name === editedAgent.model || m.displayName === editedAgent.model
+      );
+      if (matched) {
+        mainAgentModels = [matched.displayName];
+        mainAgentModelIds.push(matched.id);
+      }
+    }
+
+    const defaultAuthor =
+      editedAgent.author?.trim() ||
+      user?.email ||
+      (isSpeedMode ? "Default User" : "");
+
+    if (!editedAgent.author?.trim()) {
+      const resolvedAuthor = user?.email || (isSpeedMode ? "Default User" : "");
+      if (resolvedAuthor) {
+        updateAgentConfig({ author: resolvedAuthor });
+      }
+    }
+
     const initialAgentInfo: Record<string, any> = {
       agentName: editedAgent.name || "",
       agentDisplayName: editedAgent.display_name || "",
-      agentAuthor: editedAgent.author || user?.email || (isSpeedMode ? "Default User" : ""),
-      mainAgentModel: editedAgent.model,
-      mainAgentModelId: editedAgent.model_id,
+      agentAuthor: defaultAuthor,
+      mainAgentModels: mainAgentModels,
+      mainAgentModelIds: mainAgentModelIds,
       mainAgentMaxStep: editedAgent.max_step || 15,
+      requestedOutputTokens: editedAgent.requested_output_tokens ?? null,
       agentDescription: editedAgent.description || "",
       group_ids: normalizeNumberArray(editedAgent.group_ids || []),
       ingroup_permission: editedAgent.ingroup_permission || "READ_ONLY",
@@ -178,9 +235,28 @@ export default function AgentGenerateDetail({}) {
       promptTemplateId: editedAgent.prompt_template_id,
       promptTemplateName: editedAgent.prompt_template_name || "system_default",
     };
-    form.setFieldsValue(initialAgentInfo);
+    queueMicrotask(() => {
+      form.setFieldsValue(initialAgentInfo);
+      setWatchedPromptTemplateId(initialAgentInfo.promptTemplateId);
+      setWatchedBusinessDescription(initialAgentInfo.businessDescription || "");
+      setWatchedBusinessLogicModelId(initialAgentInfo.businessLogicModelId);
+      setWatchedDutyPrompt(initialAgentInfo.dutyPrompt || "");
+      setWatchedConstraintPrompt(initialAgentInfo.constraintPrompt || "");
+      setWatchedFewShotsPrompt(initialAgentInfo.fewShotsPrompt || "");
+    });
 
-  }, [form, currentAgentId, editedAgent, isCreatingMode, defaultLlmModel, accessibleGroupIds, forceRefreshKey]);
+  }, [form, currentAgentId, editedAgent, isCreatingMode, defaultLlmModel, accessibleGroupIds, forceRefreshKey, availableLlmModels, user?.email, isSpeedMode, updateAgentConfig]);
+
+  // Re-validate requested output tokens when the selected model's max changes,
+  // so switching to a model with a lower cap surfaces the violation immediately
+  // instead of waiting until save.
+  useEffect(() => {
+    queueMicrotask(() => {
+      if (form.getFieldValue("requestedOutputTokens") != null) {
+        form.validateFields(["requestedOutputTokens"]).catch(() => {});
+      }
+    });
+  }, [form, selectedMainAgentModel?.maxOutputTokens]);
 
   // Handle business description change
   const handleBusinessDescriptionChange = (value: string) => {
@@ -232,6 +308,10 @@ export default function AgentGenerateDetail({}) {
     if (!editable || isGenerating || !modelId) {
       return;
     }
+    // Sync watched values before opening modal to ensure they're available on render
+    setWatchedDutyPrompt(form.getFieldValue("dutyPrompt") || "");
+    setWatchedConstraintPrompt(form.getFieldValue("constraintPrompt") || "");
+    setWatchedFewShotsPrompt(form.getFieldValue("fewShotsPrompt") || "");
     setOptimizeModalType(type);
     setOptimizeModalOpen(true);
   };
@@ -518,11 +598,52 @@ export default function AgentGenerateDetail({}) {
   };
 
   // Select options for available models
-  const modelSelectOptions = availableLlmModels.map((model) => ({
-    value: model.displayName || model.name,
-    label: model.displayName || model.name,
-    disabled: model.connect_status !== "available",
-  }));
+  // Bare-capacity rows (`context_window_tokens IS NULL OR max_output_tokens IS
+  // NULL`) stay selectable per W11 spec; the warning is the inline subtitle
+  // and the non-blocking form notice below.
+  const modelSelectOptions = availableLlmModels.map((model) => {
+    const isBare = bareCapacityModelIds.has(model.id);
+    const displayLabel = model.displayName || model.name;
+    return {
+      value: displayLabel,
+      label: isBare ? (
+        <Flex align="center" gap={6}>
+          <span>{displayLabel}</span>
+          <Tooltip title={t("agent.modelSelector.bareCapacity.tooltip")}>
+            <TriangleAlert size={14} className="text-yellow-500 shrink-0" />
+          </Tooltip>
+        </Flex>
+      ) : (
+        displayLabel
+      ),
+      disabled: model.connect_status !== "available",
+    };
+  });
+
+  const isSelectedMainModelBare = Boolean(
+    selectedMainAgentModel && bareCapacityModelIds.has(selectedMainAgentModel.id)
+  );
+
+  const selectedBusinessLogicModel = useMemo(() => {
+    const businessName =
+      form.getFieldValue("businessLogicModelName") ||
+      editedAgent.business_logic_model_name ||
+      "";
+    if (!businessName) return undefined;
+    return availableLlmModels.find(
+      (m) => m.displayName === businessName || m.name === businessName
+    );
+  }, [
+    availableLlmModels,
+    editedAgent.business_logic_model_name,
+    form,
+    forceRefreshKey,
+  ]);
+
+  const isSelectedBusinessLogicModelBare = Boolean(
+    selectedBusinessLogicModel &&
+      bareCapacityModelIds.has(selectedBusinessLogicModel.id)
+  );
 
   const promptTemplateSelectOptions = useMemo(() => {
     const options = promptTemplates.map((template) => ({
@@ -669,6 +790,23 @@ export default function AgentGenerateDetail({}) {
                       </span>
                     </Button>
                   </Flex>
+                  {(isSelectedMainModelBare || isSelectedBusinessLogicModelBare) && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t(
+                        userCanManageModels
+                          ? "agent.modelSelector.bareCapacity.formNotice"
+                          : "agent.modelSelector.bareCapacity.formNoticeNoPermission",
+                        {
+                          modelName:
+                            (isSelectedMainModelBare && selectedMainAgentModel?.displayName) ||
+                            (isSelectedBusinessLogicModelBare && selectedBusinessLogicModel?.displayName) ||
+                            "",
+                        }
+                      )}
+                    />
+                  )}
                 </Flex>
               </Form>
             </Card>
@@ -809,7 +947,7 @@ export default function AgentGenerateDetail({}) {
                       </Can>
 
                       <Row gutter={16}>
-                        <Col span={12}>
+                        <Col span={8}>
                           <Form.Item
                             name="agentAuthor"
                             label={t("agent.author")}
@@ -828,14 +966,19 @@ export default function AgentGenerateDetail({}) {
                             />
                           </Form.Item>
                         </Col>
-                        <Col span={12}>
+                        <Col span={16}>
                           <Form.Item
-                            name="mainAgentModel"
+                            name="mainAgentModels"
                             label={t("businessLogic.config.model")}
                             rules={[
                               {
                                 required: true,
                                 message: t("businessLogic.config.modelPlaceholder"),
+                              },
+                              {
+                                type: "array",
+                                max: 5,
+                                message: t("businessLogic.config.modelMax5"),
                               },
                             ]}
                             help={
@@ -844,38 +987,54 @@ export default function AgentGenerateDetail({}) {
                             }
                           >
                             <Select
+                              mode="multiple"
                               placeholder={t("businessLogic.config.modelPlaceholder")}
-                              value={form.getFieldValue("mainAgentModel") || editedAgent.model || ""}
-                              onChange={(value) => {
-                                const selectedModel = availableLlmModels.find(
-                                  (m) => m.displayName === value
+                              value={form.getFieldValue("mainAgentModels") || []}
+                              onChange={(values: string[]) => {
+                                const selectedModels = availableLlmModels.filter(
+                                  (m) => values.includes(m.displayName)
                                 );
+                                const modelIds = selectedModels.map((m) => m.id);
                                 form.setFieldsValue({
-                                  mainAgentModel: value,
-                                  mainAgentModelId: selectedModel?.id || 0,
+                                  mainAgentModels: values,
+                                  mainAgentModelIds: modelIds,
                                 });
                                 updateAgentConfig({
-                                  model: value,
-                                  model_id: selectedModel?.id || 0,
+                                  model: values[0] || "",
+                                  model_ids: modelIds,
                                 });
                               }}
+                              maxTagCount={3}
+                              maxTagTextLength={12}
                             >
-                              {availableLlmModels.map((model) => (
-                                <Select.Option
-                                  key={model.id}
-                                  value={model.displayName}
-                                  disabled={model.connect_status !== "available"}
-                                >
-                                  {model.displayName}
-                                </Select.Option>
-                              ))}
+                              {availableLlmModels.map((model) => {
+                                const isBare = bareCapacityModelIds.has(model.id);
+                                return (
+                                  <Select.Option
+                                    key={model.id}
+                                    value={model.displayName}
+                                    disabled={model.connect_status !== "available"}
+                                  >
+                                    {isBare ? (
+                                      <Flex align="center" gap={6}>
+                                        <span>{model.displayName}</span>
+                                        <Tooltip title={t("agent.modelSelector.bareCapacity.tooltip")}>
+                                          <TriangleAlert size={14} className="text-yellow-500 shrink-0" />
+                                        </Tooltip>
+                                      </Flex>
+                                    ) : (
+                                      model.displayName
+                                    )}
+                                  </Select.Option>
+                                );
+                              })}
                             </Select>
                           </Form.Item>
                         </Col>
                       </Row>
 
                       <Row gutter={16}>
-                        <Col span={8}>
+                        <Col span={12}>
                           <Form.Item
                             name="mainAgentMaxStep"
                             label={t("businessLogic.config.maxSteps")}
@@ -887,14 +1046,12 @@ export default function AgentGenerateDetail({}) {
                               {
                                 type: "number",
                                 min: 1,
-                                max: 30,
                                 message: t("businessLogic.config.maxSteps"),
                               },
                             ]}
                           >
                             <InputNumber
                               min={1}
-                              max={30}
                               style={{ width: "100%" }}
                               onBlur={() => {
                                 const value = form.getFieldValue("mainAgentMaxStep");
@@ -903,7 +1060,7 @@ export default function AgentGenerateDetail({}) {
                             />
                           </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        <Col span={12}>
                           <Form.Item
                             name="provideRunSummary"
                             label={t("agent.provideRunSummary")}
@@ -925,7 +1082,54 @@ export default function AgentGenerateDetail({}) {
                             />
                           </Form.Item>
                         </Col>
-                        <Col span={8}>
+                      </Row>
+
+                      <Row gutter={16}>
+                        <Col span={12}>
+                          <Form.Item
+                            name="requestedOutputTokens"
+                            label={t("agent.requestedOutputTokens")}
+                            tooltip={t("agent.requestedOutputTokens.tooltip")}
+                            rules={[
+                              {
+                                type: "number",
+                                min: 1,
+                                message: t("agent.requestedOutputTokens.error"),
+                              },
+                              ...(selectedMainAgentModel?.maxOutputTokens
+                                ? [
+                                    {
+                                      type: "number" as const,
+                                      max: selectedMainAgentModel.maxOutputTokens,
+                                      message: t(
+                                        "agent.requestedOutputTokens.maxError",
+                                        { max: selectedMainAgentModel.maxOutputTokens }
+                                      ),
+                                    },
+                                  ]
+                                : []),
+                            ]}
+                          >
+                            <InputNumber
+                              min={1}
+                              max={selectedMainAgentModel?.maxOutputTokens}
+                              precision={0}
+                              placeholder={
+                                selectedMainAgentModel?.defaultOutputReserveTokens
+                                  ? String(selectedMainAgentModel.defaultOutputReserveTokens)
+                                  : undefined
+                              }
+                              style={{ width: "100%" }}
+                              onChange={(value) => {
+                                updateAgentConfig({
+                                  requested_output_tokens:
+                                    typeof value === "number" ? value : null,
+                                });
+                              }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={12}>
                           <Form.Item
                             name="verificationEnabled"
                             label={t("agent.verification")}
@@ -1081,7 +1285,7 @@ export default function AgentGenerateDetail({}) {
         open={promptTemplateManagerOpen}
         editable={editable}
         templates={promptTemplates}
-        selectedTemplateId={form.getFieldValue("promptTemplateId") || editedAgent.prompt_template_id || 0}
+        selectedTemplateId={watchedPromptTemplateId ?? editedAgent.prompt_template_id ?? 0}
         onClose={() => setPromptTemplateManagerOpen(false)}
         onSelectTemplate={handleSelectPromptTemplate}
         onTemplatesChanged={invalidatePromptTemplates}
@@ -1099,11 +1303,15 @@ export default function AgentGenerateDetail({}) {
           sectionType={
             optimizeModalType === "few-shots" ? "few_shots" : optimizeModalType
           }
-          taskDescription={form.getFieldValue("businessDescription") || editedAgent.business_description || ""}
+          taskDescription={watchedBusinessDescription ?? editedAgent.business_description ?? ""}
           currentContent={
-            form.getFieldValue(getPromptFieldKey(optimizeModalType)) || ""
+            optimizeModalType === "duty"
+              ? watchedDutyPrompt ?? ""
+              : optimizeModalType === "constraint"
+                ? watchedConstraintPrompt ?? ""
+                : watchedFewShotsPrompt ?? ""
           }
-          modelId={form.getFieldValue("businessLogicModelId")}
+          modelId={watchedBusinessLogicModelId ?? 0}
           agentId={currentAgentId ?? 0}
           toolIds={
             Array.isArray(editedAgent.tools)

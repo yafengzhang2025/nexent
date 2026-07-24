@@ -13,6 +13,9 @@ SCHEMA = "nexent"
 # Shared doc strings for primary key columns
 _PRIMARY_KEY_DOC = "Primary key, auto-increment"
 _TENANT_ID_DOC = "Tenant ID for multi-tenancy isolation"
+_PUBLISHER_TENANT_ID_DOC = "Publisher tenant ID"
+_PUBLISHER_USER_ID_DOC = "Publisher user ID"
+_MCP_NAME_DOC = "MCP name"
 
 # Base class for tables without audit fields
 
@@ -43,6 +46,7 @@ class ConversationRecord(TableBase):
     conversation_id = Column(Integer, Sequence(
         "conversation_record_t_conversation_id_seq", schema=SCHEMA), primary_key=True, nullable=False)
     conversation_title = Column(String(100), doc="Conversation title")
+    agent_id = Column(Integer, doc="Agent ID used by the latest run in this conversation")
 
 
 class ConversationMessage(TableBase):
@@ -65,6 +69,9 @@ class ConversationMessage(TableBase):
         String, doc="Images or documents uploaded by the user on the chat page, stored as a list")
     opinion_flag = Column(String(
         1), doc="User evaluation of the conversation. Enumeration value \"Y\" represents a positive review, \"N\" represents a negative review")
+    status = Column(
+        String(30), default='completed',
+        doc="Lifecycle status: pending / streaming / completed / failed / stopped")
 
 
 class ConversationMessageUnit(TableBase):
@@ -85,6 +92,9 @@ class ConversationMessageUnit(TableBase):
     unit_type = Column(String(100), doc="Type of the smallest answer unit")
     unit_content = Column(
         String, doc="Complete content of the smallest reply unit")
+    unit_status = Column(
+        String(30), default='completed',
+        doc="Lifecycle status: streaming (still aggregating) or completed (fully persisted)")
 
 
 class ConversationSourceImage(TableBase):
@@ -145,6 +155,62 @@ class ConversationSourceSearch(TableBase):
         30), doc="Simple tool identifier used to distinguish the index source in the summary text output by the large model")
 
 
+class ConversationShare(TableBase):
+    """
+    Public read-only snapshot of selected Q&A pairs from a conversation.
+    """
+    __tablename__ = "conversation_share_t"
+    __table_args__ = (
+        Index("idx_conversation_share_token", "share_token"),
+        Index("idx_conversation_share_conversation_id", "conversation_id"),
+        {"schema": SCHEMA},
+    )
+
+    share_id = Column(Integer, Sequence(
+        "conversation_share_t_share_id_seq", schema=SCHEMA), primary_key=True, nullable=False)
+    share_token = Column(String(64), nullable=False, unique=True,
+                         doc="Opaque public share token")
+    conversation_id = Column(Integer, nullable=False,
+                             doc="Original conversation ID")
+    tenant_id = Column(String(100), doc="Tenant that created the share")
+    title = Column(String(200), doc="Snapshot title")
+    mode = Column(String(30), default="selected",
+                  doc="Share mode: all or selected")
+    selected_message_ids = Column(JSONB, doc="Selected original message IDs")
+    snapshot_json = Column(JSONB, nullable=False,
+                           doc="Frozen frontend-compatible conversation payload")
+    status = Column(String(30), default="active",
+                    doc="active or revoked")
+    expire_time = Column(TIMESTAMP(timezone=False),
+                         doc="Optional expiration time")
+
+
+class ConversationShareAsset(TableBase):
+    """
+    File objects allowed to be accessed through a public share token.
+    """
+    __tablename__ = "conversation_share_asset_t"
+    __table_args__ = (
+        Index("idx_conversation_share_asset_token", "share_token"),
+        Index("idx_conversation_share_asset_id", "asset_id"),
+        {"schema": SCHEMA},
+    )
+
+    share_asset_id = Column(Integer, Sequence(
+        "conversation_share_asset_t_share_asset_id_seq", schema=SCHEMA), primary_key=True, nullable=False)
+    asset_id = Column(String(64), nullable=False, unique=True,
+                      doc="Opaque public asset token")
+    share_token = Column(String(64), nullable=False,
+                         doc="Parent share token")
+    object_name = Column(String(1000), nullable=False,
+                         doc="Original MinIO object name")
+    filename = Column(String(500), doc="Display/download filename")
+    content_type = Column(String(200), doc="Content type")
+    size = Column(BigInteger, doc="File size in bytes")
+    source_kind = Column(String(50), doc="attachment, source, image, markdown")
+    metadata_json = Column(JSONB, doc="Original reference metadata")
+
+
 class ModelRecord(TableBase):
     """
     Model list defined by the user on the configuration page
@@ -188,6 +254,20 @@ class ModelRecord(TableBase):
         Integer, doc="Request timeout in seconds for this model. Default is 120 seconds.")
     concurrency_limit = Column(
         Integer, doc="Maximum concurrent requests for this model. Default is null (unlimited).")
+    context_window_tokens = Column(
+        Integer, doc="Total combined input/output context window in tokens, when the provider uses a combined window. Nullable.")
+    max_input_tokens = Column(
+        Integer, doc="Provider hard input-token limit when distinct from the combined window. Nullable.")
+    max_output_tokens = Column(
+        Integer, doc="Provider-supported or operator-configured completion-output cap. Replaces the ambiguous LLM meaning of max_tokens. Nullable.")
+    default_output_reserve_tokens = Column(
+        Integer, doc="Default output allowance reserved per request before constructing input context. Nullable.")
+    tokenizer_family = Column(
+        String(100), doc="Token-counting strategy or provider/model tokenizer identifier mapped via tokenizer_registry. Nullable.")
+    capacity_source = Column(
+        String(100), doc="Source of the persisted capacity value. Optional values: operator, profile, provider_candidate, legacy, default, unknown.")
+    capability_profile_version = Column(
+        String(100), doc="Version of the approved provider/model capability profile used by the request, e.g. openai/gpt-4o@1.")
 
 
 class ModelMonitoringRecord(SimpleTableBase):
@@ -237,6 +317,69 @@ class ModelMonitoringRecord(SimpleTableBase):
     input_tokens = Column(Integer, doc="Number of input tokens")
     output_tokens = Column(Integer, doc="Number of output tokens")
     total_tokens = Column(Integer, doc="Total tokens (input + output)")
+    context_window_tokens = Column(
+        Integer, doc="Resolved total combined model context window for this request"
+    )
+    default_output_reserve_tokens = Column(
+        Integer, doc="Default output allowance reserved before input context construction"
+    )
+    capability_profile_version = Column(
+        String(100), doc="Version of the resolved capacity profile for this request"
+    )
+    capacity_source = Column(
+        String(100), doc="Dominant source of resolved capacity fields for this request"
+    )
+    requested_output_tokens = Column(
+        Integer, doc="Output tokens requested or reserved during capacity resolution"
+    )
+    provider_input_limit_tokens = Column(
+        Integer, doc="Resolved provider input-token limit used by context management"
+    )
+    tokenizer_family = Column(
+        String(100), doc="Tokenizer family used for request token counting"
+    )
+    counting_mode = Column(
+        String(20), doc="Token counting mode for the request: exact or estimated"
+    )
+    unknown_capabilities = Column(
+        JSONB, doc="Structured list of capacity capabilities unknown at resolution time"
+    )
+    capacity_fingerprint = Column(
+        String(64), doc="Fingerprint of the resolved model capacity snapshot"
+    )
+    budget_fingerprint = Column(
+        String(64), doc="Fingerprint of the resolved W2 safe input budget snapshot"
+    )
+    budget_w1_fingerprint = Column(
+        String(64), doc="W1 capacity fingerprint consumed by the W2 budget snapshot"
+    )
+    budget_requested_output_tokens = Column(
+        Integer, doc="W2 trusted requested output tokens used at dispatch"
+    )
+    budget_output_reserve_source = Column(
+        String(32), doc="Source of the W2 requested output token reserve"
+    )
+    budget_provider_input_limit_tokens = Column(
+        Integer, doc="Provider input limit after applying the W2 output reserve"
+    )
+    budget_uncertainty_reserve_tokens = Column(
+        Integer, doc="Additional W2 uncertainty reserve deducted from input budget"
+    )
+    budget_uncertainty_reserve_basis = Column(
+        String(64), doc="Basis used for the W2 uncertainty reserve"
+    )
+    budget_soft_limit_ratio = Column(
+        Float, doc="W2 soft input budget ratio"
+    )
+    budget_soft_input_budget_tokens = Column(
+        Integer, doc="W2 soft input budget where proactive compression begins"
+    )
+    budget_hard_input_budget_tokens = Column(
+        Integer, doc="W2 hard input budget consumed by W3 final fit"
+    )
+    budget_warnings = Column(
+        JSONB, doc="Structured W2 budget warnings active for this request"
+    )
     generation_rate = Column(
         Float, doc="Token generation rate (tokens per second)")
     is_streaming = Column(
@@ -286,6 +429,7 @@ class ToolInfo(TableBase):
     inputs = Column(String(2048), doc="Prompt tool inputs description")
     output_type = Column(String(100), doc="Prompt tool output description")
     category = Column(String(100), doc="Tool category description")
+    labels = Column(JSONB, default=[], doc="JSON array of label strings for filtering/grouping tools")
     is_available = Column(
         Boolean, doc="Whether the tool can be used under the current main service")
 
@@ -305,10 +449,8 @@ class AgentInfo(TableBase):
     display_name = Column(String(100), doc="Agent display name")
     description = Column(Text, doc="Description")
     author = Column(String(100), doc="Agent author")
-    model_name = Column(
-        String(100), doc="[DEPRECATED] Name of the model used, use model_id instead")
-    model_id = Column(
-        Integer, doc="Model ID, foreign key reference to model_record_t.model_id")
+    model_ids = Column(
+        ARRAY(Integer), doc="List of model IDs, foreign key references to model_record_t.model_id, max 5 models")
     max_steps = Column(Integer, doc="Maximum number of steps")
     duty_prompt = Column(Text, doc="Duty prompt content")
     constraint_prompt = Column(Text, doc="Constraint prompt content")
@@ -332,7 +474,14 @@ class AgentInfo(TableBase):
     is_new = Column(Boolean, default=False, doc="Whether this agent is marked as new for the user")
     current_version_no = Column(Integer, nullable=True, doc="Current published version number. NULL means no version published yet")
     ingroup_permission = Column(String(30), doc="In-group permission: EDIT, READ_ONLY, PRIVATE")
-    enable_context_manager = Column(Boolean, default=False, doc="Whether to enable context management (compression) for this agent")
+    requested_output_tokens = Column(
+        Integer,
+        doc=(
+            "Per-agent override for W2 requested_output_tokens. NULL means "
+            "inherit the resolved model-level default."
+        ),
+    )
+    enable_context_manager = Column(Boolean, default=True, doc="Whether to enable context management (compression) for this agent")
     verification_config = Column(JSONB, doc="Layered ReAct self-verification configuration")
     greeting_message = Column(Text, doc="Agent greeting message displayed on chat initial screen")
     example_questions = Column(JSONB, doc="List of example questions for starting a conversation with this agent")
@@ -479,7 +628,7 @@ class McpRecord(TableBase):
                     primary_key=True, nullable=False, doc="MCP record ID, unique primary key")
     tenant_id = Column(String(100), doc="Tenant ID")
     user_id = Column(String(100), doc="User ID")
-    mcp_name = Column(String(100), doc="MCP name")
+    mcp_name = Column(String(100), doc=_MCP_NAME_DOC)
     mcp_server = Column(String(500), doc="MCP server address")
     status = Column(
         Boolean,
@@ -506,6 +655,7 @@ class McpRecord(TableBase):
     )
     source = Column(
         String(30), doc="Source type: local/mcp_registry/community")
+    market_id = Column(Integer, doc="Published market record ID (FK to mcp_market_record_t)")
     registry_json = Column(JSONB, doc="Full MCP registry server.json snapshot")
     config_json = Column(JSON, doc="MCP config data")
     enabled = Column(Boolean, default=True, doc="Enabled")
@@ -526,18 +676,51 @@ class McpCommunityRecord(TableBase):
         nullable=False,
         doc="Community record ID, unique primary key",
     )
-    tenant_id = Column(String(100), doc="Publisher tenant ID")
-    user_id = Column(String(100), doc="Publisher user ID")
-    mcp_name = Column(String(100), doc="MCP name")
+    tenant_id = Column(String(100), doc=_PUBLISHER_TENANT_ID_DOC)
+    user_id = Column(String(100), doc=_PUBLISHER_USER_ID_DOC)
+    mcp_name = Column(String(100), doc=_MCP_NAME_DOC)
     mcp_server = Column(String(500), doc="MCP server URL")
     source = Column(String(30), doc="Source type, fixed to community")
-    version = Column(String(50), doc="MCP version")
     registry_json = Column(JSONB, doc="Full MCP metadata JSON")
     transport_type = Column(
         String(30), doc="Transport type: http/sse/container")
     config_json = Column(JSON, doc="Public-shareable MCP configuration JSON")
+    review_status = Column(
+        String(30), default="pending", doc="Review status: pending/approved/rejected/offline")
+    review_type = Column(
+        String(30), default="initial_listing", doc="Review submission type: initial_listing/update")
     tags = Column(ARRAY(Text), doc="Tags")
     description = Column(Text, doc="Description")
+
+
+class McpMarketRecord(TableBase):
+    """MCP market (community) record — single table covering all listing states."""
+
+    __tablename__ = "mcp_market_record_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    market_id = Column(
+        BigInteger,
+        Sequence("mcp_market_record_t_market_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc="Market record ID, unique primary key",
+    )
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+    user_id = Column(String(100), nullable=False, doc="Publisher user ID")
+    mcp_name = Column(String(100), doc=_MCP_NAME_DOC)
+    mcp_server = Column(String(500), doc="MCP server URL")
+    source = Column(String(30), doc="Source type, fixed to community")
+    registry_json = Column(JSONB, doc="Full MCP metadata JSON")
+    transport_type = Column(String(30), doc="Transport type: http/sse/container")
+    config_json = Column(JSON, doc="Public-shareable MCP configuration JSON")
+    tags = Column(ARRAY(Text), doc="Tags")
+    description = Column(Text, doc="Description")
+    download_count = Column(Integer, default=0, doc="Cumulative download/install count")
+    review_status = Column(String(30), default="not_shared",
+                           doc="Listing status: not_shared / pending_review / rejected / shared")
+    submitted_by = Column(String(100), doc="Submitter email when listing enters pending_review")
+    source_mcp_id = Column(Integer, doc="Local MCP record ID that created this market record")
 
 
 class UserTenant(TableBase):
@@ -714,27 +897,56 @@ class AgentRepository(TableBase):
 
     agent_repository_id = Column(BigInteger, Sequence("ag_agent_repository_t_agent_repository_id_seq", schema=SCHEMA),
                                  primary_key=True, nullable=False, doc="Agent repository listing ID, unique primary key")
-    publisher_tenant_id = Column(String(100), nullable=False, doc="Publisher tenant ID")
-    publisher_user_id = Column(String(100), nullable=False, doc="Publisher user ID")
+    publisher_tenant_id = Column(String(100), nullable=False, doc=_PUBLISHER_TENANT_ID_DOC)
+    publisher_user_id = Column(String(100), nullable=False, doc=_PUBLISHER_USER_ID_DOC)
     agent_id = Column(Integer, nullable=False,
                       doc="Root agent ID from ag_tenant_agent_t; upsert key")
-    source_version_no = Column(Integer, nullable=False,
-                               doc="Published version number frozen at share time")
+    version_no = Column(Integer, nullable=False,
+                        doc="Published version number frozen at share time")
     name = Column(String(100), nullable=False,
                   doc="Root agent programmatic name for display and search")
     display_name = Column(String(100), doc="Root agent display name")
     description = Column(Text, doc="Root agent description")
     author = Column(String(100), doc="Agent author")
-    category_id = Column(Integer, doc="Optional marketplace category ID")
+    submitted_by = Column(String(100), doc="Submitter email when listing enters pending_review")
     tags = Column(ARRAY(Text), doc="Marketplace tags")
     tool_count = Column(Integer,
                         doc="Total tool count across all agents in the bundle (display only)")
-    version_label = Column(String(100),
-                           doc="Repository entry version label for display (e.g. v1.0)")
+    icon = Column(String(100), doc="Marketplace card icon (emoji or URL)")
+    downloads = Column(Integer, default=0,
+                       doc="Marketplace download/copy count for card display")
+    version_name = Column(String(100),
+                          doc="Repository entry version name for display (from ag_tenant_agent_version_t)")
     agent_info_json = Column(JSONB, nullable=False,
                              doc="Frozen ExportAndImportDataFormat snapshot with optional skills")
-    status = Column(String(30), default="NOT_SHARED",
-                    doc="Listing status: NOT_SHARED (未共享) / PENDING_REVIEW (待审核) / REJECTED (审核驳回) / SHARED (已共享)")
+    status = Column(String(30), default="not_shared",
+                    doc="Listing status: not_shared (未共享) / pending_review (待审核) / rejected (审核驳回) / shared (已共享)")
+
+
+class SkillRepository(TableBase):
+    """
+    Skill repository (marketplace) table. Frozen snapshot of a shared skill for installation.
+    """
+    __tablename__ = "ag_skill_repository_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    skill_repository_id = Column(BigInteger, Sequence("ag_skill_repository_t_skill_repository_id_seq", schema=SCHEMA),
+                                 primary_key=True, nullable=False, doc="Skill repository listing ID, unique primary key")
+    publisher_tenant_id = Column(String(100), nullable=False, doc=_PUBLISHER_TENANT_ID_DOC)
+    publisher_user_id = Column(String(100), nullable=False, doc=_PUBLISHER_USER_ID_DOC)
+    skill_id = Column(Integer, nullable=False, doc="Source skill ID from ag_skill_info_t")
+    name = Column(String(100), nullable=False, doc="Skill name for display and search")
+    description = Column(Text, doc="Skill description")
+    source = Column(String(30), doc="Skill source")
+    submitted_by = Column(String(100), doc="Submitter email when listing enters pending_review")
+    category_id = Column(Integer, doc="Optional marketplace category ID")
+    tags = Column(ARRAY(Text), doc="Marketplace tags")
+    icon = Column(String(100), doc="Marketplace card icon (emoji or URL)")
+    downloads = Column(Integer, default=0, doc="Marketplace install count for card display")
+    skill_info_json = Column(JSONB, nullable=False, doc="Frozen skill metadata snapshot")
+    skill_zip_base64 = Column(Text, nullable=False, doc="Frozen skill ZIP payload encoded as base64")
+    status = Column(String(30), default="not_shared",
+                    doc="Listing status: not_shared / pending_review / rejected / shared")
 
 
 class UserTokenInfo(TableBase):
@@ -1224,5 +1436,164 @@ class A2AArtifact(SimpleTableBase):
     extensions = Column(JSON, doc="Extension URI list")
 
     # Timestamp
-    create_time = Column(TIMESTAMP(
-        timezone=False), server_default=func.now(), doc="Artifact creation timestamp")
+    create_time = Column(TIMESTAMP(timezone=False), server_default=func.now(), doc="Artifact creation timestamp")
+
+
+# -----------------------------------------------------------------------------
+# Agent Evaluation (offline) tables
+# -----------------------------------------------------------------------------
+class EvaluationSet(TableBase):
+    """Evaluation set metadata."""
+
+    __tablename__ = "evaluation_set_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    evaluation_set_id = Column(
+        BigInteger,
+        Sequence("evaluation_set_t_evaluation_set_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc=_PRIMARY_KEY_DOC,
+    )
+
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+    name = Column(String(255), nullable=False, doc="Evaluation set name")
+    description = Column(Text, doc="Evaluation set description")
+
+    source_filename = Column(String(255), doc="Original uploaded filename")
+    case_count = Column(Integer, default=0, doc="Total number of cases")
+
+    __table_args__ = (
+        Index("ix_eval_set_tenant_id", "tenant_id"),
+        Index("ix_eval_set_name", "tenant_id", "name"),
+        {"schema": SCHEMA},
+    )
+
+
+class EvaluationSetCase(TableBase):
+    """Evaluation cases belonging to a set."""
+
+    __tablename__ = "evaluation_set_case_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    evaluation_set_case_id = Column(
+        BigInteger,
+        Sequence("evaluation_set_case_t_evaluation_set_case_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc=_PRIMARY_KEY_DOC,
+    )
+
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+    evaluation_set_id = Column(BigInteger, nullable=False, doc="Evaluation set id")
+
+    case_id = Column(String(128), doc="External case_id from JSONL (optional)")
+
+    inputs = Column(JSONB, nullable=False, doc="Case inputs JSON")
+    label = Column(JSONB, nullable=False, doc="Case label JSON")
+
+    order_no = Column(Integer, default=0, doc="Case order in the set")
+
+    __table_args__ = (
+        Index("ix_eval_set_case_set_id", "evaluation_set_id"),
+        Index("ix_eval_set_case_tenant_id", "tenant_id"),
+        {"schema": SCHEMA},
+    )
+
+
+class AgentEvaluation(TableBase):
+    """An evaluation run for a specific agent and evaluation set."""
+
+    __tablename__ = "agent_evaluation_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    agent_evaluation_id = Column(
+        BigInteger,
+        Sequence("agent_evaluation_t_agent_evaluation_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc=_PRIMARY_KEY_DOC,
+    )
+
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+
+    agent_id = Column(Integer, nullable=False, doc="Agent id")
+    agent_version_no = Column(Integer, nullable=False, doc="Published agent version_no used for evaluation")
+
+    evaluation_set_id = Column(BigInteger, nullable=False, doc="Evaluation set id")
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="PENDING",
+        doc="Run status: PENDING/RUNNING/COMPLETED/FAILED",
+    )
+
+    progress_total = Column(Integer, default=0, doc="Total cases")
+    progress_done = Column(Integer, default=0, doc="Completed cases")
+
+    judge_model_id = Column(
+        Integer,
+        doc=(
+            "Model id used by the judge. Persisted so the background worker can "
+            "recover it after restart and the frontend can resolve judge_model_name."
+        ),
+    )
+
+    score_overall = Column(Float, doc="Overall score (0-1)")
+
+    error_message = Column(Text, doc="Failure reason")
+
+    __table_args__ = (
+        Index("ix_agent_eval_tenant_id", "tenant_id"),
+        Index("ix_agent_eval_agent_id", "tenant_id", "agent_id"),
+        Index("ix_agent_eval_set_id", "tenant_id", "evaluation_set_id"),
+        Index("ix_agent_eval_judge_model_id", "tenant_id", "judge_model_id"),
+        {"schema": SCHEMA},
+    )
+
+
+class AgentEvaluationCase(TableBase):
+    """Per-case evaluation details within an evaluation run."""
+
+    __tablename__ = "agent_evaluation_case_t"
+    __table_args__ = {"schema": SCHEMA}
+
+    agent_evaluation_case_id = Column(
+        BigInteger,
+        Sequence("agent_evaluation_case_t_agent_evaluation_case_id_seq", schema=SCHEMA),
+        primary_key=True,
+        nullable=False,
+        doc=_PRIMARY_KEY_DOC,
+    )
+
+    tenant_id = Column(String(100), nullable=False, doc=_TENANT_ID_DOC)
+
+    agent_evaluation_id = Column(BigInteger, nullable=False, doc="Evaluation run id")
+    evaluation_set_case_id = Column(BigInteger, nullable=False, doc="Evaluation set case id")
+
+    inputs = Column(JSONB, nullable=False, doc="Case inputs snapshot (query only for pass cases)")
+    label = Column(JSONB, nullable=False, doc="Case label snapshot (cleared to {answer:''} for pass cases)")
+    predict = Column(JSONB, doc="Predict JSON (answer/raw); NULL for pass cases")
+
+    score = Column(Float, doc="Case score (0-1)")
+    reason = Column(Text, doc="Judge reason; NULL for pass cases")
+    pass_status = Column(
+        String(16),
+        doc="Judge result: pass / fail. Pass cases have predict/reason/label.answer cleared to save space.",
+    )
+
+    status = Column(
+        String(30),
+        nullable=False,
+        default="PENDING",
+        doc="Case status: PENDING/RUNNING/COMPLETED/FAILED",
+    )
+    error_message = Column(Text, doc="Per-case failure reason")
+
+    __table_args__ = (
+        Index("ix_agent_eval_case_eval_id", "agent_evaluation_id"),
+        Index("ix_agent_eval_case_tenant_id", "tenant_id"),
+        Index("ix_agent_eval_case_pass_status", "tenant_id", "agent_evaluation_id", "pass_status"),
+        {"schema": SCHEMA},
+    )

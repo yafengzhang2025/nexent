@@ -6,30 +6,33 @@ import { ModelOption } from "@/types/modelConfig";
 import { GENERATE_PROMPT_STREAM_TYPES } from "../const/agentConfig";
 import type { PromptTemplateFieldKey } from "../const/promptTemplate";
 
-export type AgentConfigUpdate = Partial<Pick<
-  Agent,
-  | "name"
-  | "display_name"
-  | "author"
-  | "model"
-  | "model_id"
-  | "max_step"
-  | "provide_run_summary"
-  | "description"
-  | "duty_prompt"
-  | "constraint_prompt"
-  | "few_shots_prompt"
-  | "business_description"
-  | "business_logic_model_id"
-  | "business_logic_model_name"
-  | "prompt_template_id"
-  | "prompt_template_name"
-  | "verification_config"
-  | "group_ids"
-  | "ingroup_permission"
-  | "greeting_message"
-  | "example_questions"
->>;
+export type AgentConfigUpdate = Partial<
+  Pick<
+    Agent,
+    | "name"
+    | "display_name"
+    | "author"
+    | "model"
+    | "model_ids"
+    | "max_step"
+    | "requested_output_tokens"
+    | "provide_run_summary"
+    | "description"
+    | "duty_prompt"
+    | "constraint_prompt"
+    | "few_shots_prompt"
+    | "business_description"
+    | "business_logic_model_id"
+    | "business_logic_model_name"
+    | "prompt_template_id"
+    | "prompt_template_name"
+    | "verification_config"
+    | "group_ids"
+    | "ingroup_permission"
+    | "greeting_message"
+    | "example_questions"
+  >
+>;
 
 export interface AgentVerificationConfig {
   enabled: boolean;
@@ -51,7 +54,7 @@ export interface AgentVerificationConfig {
 }
 
 export const DEFAULT_AGENT_VERIFICATION_CONFIG: AgentVerificationConfig = {
-  enabled: true,
+  enabled: false,
   step_verification_enabled: true,
   final_verification_enabled: true,
   llm_verification_enabled: true,
@@ -79,13 +82,15 @@ export interface Agent {
   author?: string;
   unavailable_reasons?: string[];
   model: string;
-  model_id?: number;
+  model_ids?: number[];
+  model_names?: string[]; // Model display names resolved from model_ids for list/detail responses
   max_step: number;
+  requested_output_tokens?: number | null;
   provide_run_summary: boolean;
   enable_context_manager?: boolean;
   verification_config?: AgentVerificationConfig;
   tools: Tool[];
-  skills?: Skill[];  // Skills configured for this agent
+  skills?: Skill[]; // Skills configured for this agent
   duty_prompt?: string;
   constraint_prompt?: string;
   few_shots_prompt?: string;
@@ -97,7 +102,7 @@ export interface Agent {
   is_available?: boolean;
   is_new?: boolean;
   sub_agent_id_list?: number[];
-  external_sub_agent_id_list?: number[];  // External A2A agent IDs
+  external_sub_agent_id_list?: number[]; // External A2A agent IDs
   group_ids?: number[];
   ingroup_permission?: "EDIT" | "READ_ONLY" | "PRIVATE";
   /**
@@ -126,12 +131,18 @@ export interface Tool {
   usage?: string;
   inputs?: string;
   category?: string;
+  labels?: string[];
   /**
    * Knowledge base display names associated with this tool.
    * This is populated when the tool (e.g., knowledge_base_search) has knowledge bases configured.
    * Used to pass knowledge base names to prompt generation without requiring database lookup.
    */
   display_names?: string[];
+  /**
+   * Reasons why this tool may be unavailable.
+   * E.g., ["mcp_model_unavailable"] when the selected model has been deleted.
+   */
+  unavailable_reasons?: string[];
 }
 
 export interface ToolParam {
@@ -145,6 +156,20 @@ export interface ToolParam {
   depends_on?: string;
 }
 
+export interface AidpKnowledgeBaseItem {
+  kds_id: string;
+  kds_name: string;
+  description?: string;
+  document_count?: number;
+  chunk_count?: number;
+}
+
+export interface AidpKnowledgeBaseListResponse {
+  value: AidpKnowledgeBaseItem[];
+  total_count?: number;
+  next_link?: string | null;
+}
+
 export interface SkillParam {
   name: string;
   type: "string" | "number" | "boolean" | "array" | "object" | "Optional";
@@ -154,8 +179,6 @@ export interface SkillParam {
   description_zh?: string;
   depends_on?: string;
 }
-
-
 
 // ========== Data Interfaces ==========
 
@@ -191,6 +214,8 @@ export interface Skill {
   config_schemas?: SkillParam[] | null;
   config_values?: Record<string, any> | null;
   tool_ids?: number[];
+  created_by?: string | null;
+  updated_by?: string | null;
   update_time?: string;
   create_time?: string;
 }
@@ -203,7 +228,8 @@ export interface SkillGroup {
 }
 
 // Skill with installation status for tenant creation flow
-export type SkillInstallStatus = "installable" | "installed" | "resource_missing";
+export type SkillInstallStatus =
+  "installable" | "installed" | "resource_missing";
 
 export interface InstallableSkill {
   skill_id: number;
@@ -341,7 +367,6 @@ export interface CollaborativeAgentDisplayProps {
 }
 
 // ToolConfigModal component props interface
-
 
 // ExpandEditModal component props interface
 export interface ExpandEditModalProps {

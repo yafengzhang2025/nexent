@@ -3,9 +3,10 @@
 import { useTranslation } from "react-i18next";
 import { App, Flex, Button, Badge, Dropdown, Tooltip, Col, Row, Modal, Spin, Tag, theme } from "antd";
 import { useMutation } from "@tanstack/react-query";
-import { Plus, FileInput, Settings, ChevronDown, Bot, Copy, Network, FileOutput, Trash2, Globe, GitBranch, History } from "lucide-react";
+import { Plus, FileInput, Settings, ChevronDown, ChevronLeft, Bot, Copy, Network, FileOutput, Trash2, Globe, GitBranch, History } from "lucide-react";
 import { ExclamationCircleOutlined } from "@ant-design/icons";
 import { useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { StaticScrollArea } from "@/components/ui/scrollArea";
 import AgentCallRelationshipModal from "@/components/agent/AgentCallRelationshipModal";
 import A2AServerSettingsPanel from "./a2a/A2AServerSettingsPanel";
@@ -47,6 +48,11 @@ export default function AgentSelectorHeader({
 }: AgentSelectorHeaderProps) {
   const { t } = useTranslation("common");
   const { message } = App.useApp();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const params = useParams<{ locale: string }>();
+  const locale = params.locale || "en";
+  const showBackFromRepository = searchParams.get("from") === "agent-space";
   const queryClient = useQueryClient();
   const checkUnsavedChanges = useSaveGuard();
   const confirm = useConfirmModal();
@@ -262,15 +268,26 @@ export default function AgentSelectorHeader({
         .map((id: any) => Number(id))
         .filter((id: number) => Number.isFinite(id));
 
+      // Ensure model_ids always has a value - fall back to single-element array
+      // using the agent's first available legacy model_id (single-select) when
+      // model_ids is empty in the response.
+      const modelIdsForCopy = (() => {
+        if (detail.model_ids && detail.model_ids.length > 0) return detail.model_ids;
+        // Legacy payload may only carry model_id (single-select); preserve it
+        const legacySingleId = (detail as { model_id?: number }).model_id;
+        if (legacySingleId) return [legacySingleId];
+        return undefined;
+      })();
+
       const createResult = await updateAgentMutation.mutateAsync({
         agent_id: undefined, // create
         name: copyName,
         display_name: copyDisplayName,
         description: detail.description,
         author: detail.author,
-        model_name: detail.model,
-        model_id: detail.model_id ?? undefined,
+        model_ids: modelIdsForCopy,
         max_steps: detail.max_step,
+        requested_output_tokens: detail.requested_output_tokens ?? null,
         provide_run_summary: detail.provide_run_summary,
         enabled: detail.enabled,
         business_description: detail.business_description,
@@ -361,8 +378,9 @@ export default function AgentSelectorHeader({
           setCurrentAgent(null);
         }
 
-        // Refresh agent list
+        // Refresh agent lists
         queryClient.invalidateQueries({ queryKey: ["agents"] });
+        queryClient.invalidateQueries({ queryKey: ["publishedAgentsList"] });
       },
       onError: () => {
         message.error(t("businessLogic.config.error.agentDeleteFailed"));
@@ -567,6 +585,14 @@ export default function AgentSelectorHeader({
     return divider ? [agentItem, divider] : [agentItem];
   });
 
+  const handleBackToRepository = async () => {
+    const canLeave = await checkUnsavedChanges.saveWithModal();
+    if (!canLeave) {
+      return;
+    }
+    router.push(`/${locale}/agent-space?tab=mine`);
+  };
+
   return (
     <>
       <div className="w-full h-full px-6" style={{ borderBottom: "1px solid #f0f0f0" }}>
@@ -583,7 +609,18 @@ export default function AgentSelectorHeader({
             lg={12}
             className="flex min-w-0"
           >
-            <Dropdown
+            <Flex vertical className="min-w-0 w-full">
+              {showBackFromRepository ? (
+                <Button
+                  type="text"
+                  className="mb-1 flex w-fit items-center gap-1 px-2 text-gray-600"
+                  icon={<ChevronLeft className="size-4" aria-hidden />}
+                  onClick={handleBackToRepository}
+                >
+                  {t("agentRepository.mine.backToRepository")}
+                </Button>
+              ) : null}
+              <Dropdown
               trigger={["click"]}
               placement="bottomLeft"
               open={dropdownOpen}
@@ -625,6 +662,7 @@ export default function AgentSelectorHeader({
                 <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
               </div>
             </Dropdown>
+            </Flex>
 
 
           </Col>

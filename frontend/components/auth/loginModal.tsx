@@ -2,13 +2,23 @@
 
 import { useCallback, useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Modal, Form, Input, Button, Typography, Space, Divider, Alert } from "antd";
+import {
+  Modal,
+  Form,
+  Input,
+  Button,
+  Typography,
+  Space,
+  Divider,
+  Alert,
+} from "antd";
 import { UserRound, LockKeyhole, Github, Link2, KeyRound } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { useAuthenticationContext } from "@/components/providers/AuthenticationProvider";
 import { useDeployment } from "@/components/providers/deploymentProvider";
 import { getEffectiveRoutePath } from "@/lib/auth";
+import { forcedLoginService } from "@/services/forcedLoginService";
 import { oauthService } from "@/services/oauthService";
 import { casService, CasConfig } from "@/services/casService";
 import log from "@/lib/logger";
@@ -21,10 +31,14 @@ const providerIconMap: Record<string, React.ReactNode> = {
 
 function OAuthLoginButtons() {
   const { t } = useTranslation("common");
-  const [providers, setProviders] = useState<Array<{ name: string; display_name: string; icon: string }>>([]);
+  const [providers, setProviders] = useState<
+    Array<{ name: string; display_name: string; icon: string }>
+  >([]);
 
   useEffect(() => {
-    oauthService.getEnabledProviders().then((p) => setProviders(p));
+    oauthService.getConfig().then((config) => {
+      setProviders(config.login_mode === "disabled" ? [] : config.providers);
+    });
   }, []);
 
   if (providers.length === 0) return null;
@@ -41,7 +55,8 @@ function OAuthLoginButtons() {
             icon={providerIconMap[provider.icon] || <Link2 size={18} />}
             onClick={() => oauthService.startOAuthLogin(provider.name)}
           >
-            {t("auth.oauthLogin", { provider: provider.display_name }) || `${provider.display_name} Login`}
+            {t("auth.oauthLogin", { provider: provider.display_name }) ||
+              `${provider.display_name} Login`}
           </Button>
         ))}
       </div>
@@ -54,7 +69,14 @@ function CasLoginButton() {
   const [config, setConfig] = useState<CasConfig | null>(null);
 
   useEffect(() => {
-    casService.getConfig().then(setConfig);
+    let cancelled = false;
+    casService.getConfig().then((nextConfig) => {
+      if (!cancelled) setConfig(nextConfig);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!config?.enabled || config.login_mode !== "button") return null;
@@ -67,7 +89,8 @@ function CasLoginButton() {
         icon={<KeyRound size={18} />}
         onClick={() => casService.startLogin()}
       >
-        {t("auth.casLogin", { provider: config.display_name }) || `${config.display_name} Login`}
+        {t("auth.casLogin", { provider: config.display_name }) ||
+          `${config.display_name} Login`}
       </Button>
     </div>
   );
@@ -115,19 +138,13 @@ export function LoginModal() {
   useEffect(() => {
     const error = searchParams.get("oauth_error");
     if (error) {
+      if (!isAuthenticated) {
+        forcedLoginService.suppressOAuthAutoLogin();
+      }
       setOauthError(getOAuthLoginErrorMessage(error));
       router.replace("/");
     }
-  }, [searchParams, router, getOAuthLoginErrorMessage]);
-
-  useEffect(() => {
-    if (!isLoginModalOpen || isAuthenticated || isSpeedMode) return;
-    casService.getConfig().then((config) => {
-      if (config.enabled && config.login_mode === "force") {
-        casService.startLogin();
-      }
-    });
-  }, [isLoginModalOpen, isAuthenticated, isSpeedMode]);
+  }, [searchParams, router, getOAuthLoginErrorMessage, isAuthenticated]);
 
   const resetForm = () => {
     setEmailError("");
@@ -342,22 +359,23 @@ export function LoginModal() {
             </Button>
           </Form.Item>
 
-          <CasLoginButton />
+          {isLoginModalOpen && !isAuthenticated && !isSpeedMode && (
+            <CasLoginButton />
+          )}
 
           {/* OAuth login section */}
           <OAuthLoginButtons />
 
           {/* Registration link section (hidden when opened from session expired flow) */}
-          
-            <div className="text-center">
-              <Space>
-                <Text type="secondary">{t("auth.noAccount")}</Text>
-                <Button type="link" onClick={handleRegisterClick} className="p-0">
-                  {t("auth.registerNow")}
-                </Button>
-              </Space>
-            </div>
 
+          <div className="text-center">
+            <Space>
+              <Text type="secondary">{t("auth.noAccount")}</Text>
+              <Button type="link" onClick={handleRegisterClick} className="p-0">
+                {t("auth.registerNow")}
+              </Button>
+            </Space>
+          </div>
         </Form>
       </div>
     </Modal>

@@ -1,5 +1,6 @@
 import sys
 import types
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock, patch, ANY
@@ -118,6 +119,12 @@ class _MockProcessType:
     ERROR = "error"
 
 
+@dataclass
+class _MockAgentRunMetadata:
+    agent_name: str | None = None
+    query: str | None = None
+
+
 MessageObserver = _MockMessageObserver
 ProcessType = _MockProcessType
 
@@ -132,12 +139,45 @@ mock_sdk_module = types.ModuleType("sdk")
 mock_sdk_nexent_module = types.ModuleType("sdk.nexent")
 mock_sdk_nexent_core_module = types.ModuleType("sdk.nexent.core")
 mock_sdk_nexent_core_agents_module = types.ModuleType("sdk.nexent.core.agents")
+mock_sdk_nexent_core_tools_module = types.ModuleType("sdk.nexent.core.tools")
 mock_sdk_nexent_core_utils_module = types.ModuleType("sdk.nexent.core.utils")
 mock_sdk_nexent_core_utils_observer_module = types.ModuleType(
     "sdk.nexent.core.utils.observer"
 )
 mock_sdk_nexent_core_utils_observer_module.MessageObserver = _MockMessageObserver
 mock_sdk_nexent_core_utils_observer_module.ProcessType = _MockProcessType
+mock_sdk_nexent_monitor_module = types.ModuleType("sdk.nexent.monitor")
+mock_sdk_nexent_monitor_module.__path__ = []
+mock_sdk_nexent_monitor_module.AgentRunMetadata = _MockAgentRunMetadata
+mock_sdk_nexent_monitor_module.get_agent_monitoring_context = MagicMock(return_value=None)
+mock_sdk_nexent_monitor_module.get_monitoring_manager = MagicMock()
+mock_sdk_nexent_monitor_monitoring_module = types.ModuleType("sdk.nexent.monitor.monitoring")
+mock_sdk_nexent_monitor_monitoring_module.record_model_call = MagicMock()
+
+
+class _MockLegacyContextRuntime:
+    context_manager = None
+
+
+class _MockManagedContextRuntime:
+    def __init__(self, context_manager):
+        self.context_manager = context_manager
+
+
+mock_sdk_context_runtime_module = types.ModuleType("sdk.nexent.core.context_runtime")
+mock_sdk_context_runtime_module.__path__ = []
+mock_sdk_context_runtime_legacy_module = types.ModuleType("sdk.nexent.core.context_runtime.legacy")
+mock_sdk_context_runtime_legacy_module.__path__ = []
+mock_sdk_context_runtime_legacy_runtime_module = types.ModuleType(
+    "sdk.nexent.core.context_runtime.legacy.runtime"
+)
+mock_sdk_context_runtime_legacy_runtime_module.LegacyContextRuntime = _MockLegacyContextRuntime
+mock_sdk_context_runtime_managed_module = types.ModuleType("sdk.nexent.core.context_runtime.managed")
+mock_sdk_context_runtime_managed_module.__path__ = []
+mock_sdk_context_runtime_managed_runtime_module = types.ModuleType(
+    "sdk.nexent.core.context_runtime.managed.runtime"
+)
+mock_sdk_context_runtime_managed_runtime_module.ManagedContextRuntime = _MockManagedContextRuntime
 
 mock_sdk_module.__path__ = [str(SDK_SOURCE_ROOT)]
 mock_sdk_nexent_module.__path__ = [str(SDK_SOURCE_ROOT / "nexent")]
@@ -145,6 +185,9 @@ mock_sdk_nexent_core_module.__path__ = [
     str(SDK_SOURCE_ROOT / "nexent" / "core")]
 mock_sdk_nexent_core_agents_module.__path__ = [
     str(SDK_SOURCE_ROOT / "nexent" / "core" / "agents")
+]
+mock_sdk_nexent_core_tools_module.__path__ = [
+    str(SDK_SOURCE_ROOT / "nexent" / "core" / "tools")
 ]
 mock_sdk_nexent_core_utils_module.__path__ = [
     str(SDK_SOURCE_ROOT / "nexent" / "core" / "utils")]
@@ -251,8 +294,16 @@ module_mocks = {
     "sdk.nexent": mock_sdk_nexent_module,
     "sdk.nexent.core": mock_sdk_nexent_core_module,
     "sdk.nexent.core.agents": mock_sdk_nexent_core_agents_module,
+    "sdk.nexent.core.tools": mock_sdk_nexent_core_tools_module,
+    "sdk.nexent.core.context_runtime": mock_sdk_context_runtime_module,
+    "sdk.nexent.core.context_runtime.legacy": mock_sdk_context_runtime_legacy_module,
+    "sdk.nexent.core.context_runtime.legacy.runtime": mock_sdk_context_runtime_legacy_runtime_module,
+    "sdk.nexent.core.context_runtime.managed": mock_sdk_context_runtime_managed_module,
+    "sdk.nexent.core.context_runtime.managed.runtime": mock_sdk_context_runtime_managed_runtime_module,
     "sdk.nexent.core.utils": mock_sdk_nexent_core_utils_module,
     "sdk.nexent.core.utils.observer": mock_sdk_nexent_core_utils_observer_module,
+    "sdk.nexent.monitor": mock_sdk_nexent_monitor_module,
+    "sdk.nexent.monitor.monitoring": mock_sdk_nexent_monitor_monitoring_module,
     "nexent.core.utils.prompt_template_utils": mock_prompt_template_utils_module,
     "nexent.core.utils.tools_common_message": mock_tools_common_message_module,
     "nexent.core.models": mock_nexent_core_models_module,
@@ -295,6 +346,28 @@ with patch.dict("sys.modules", module_mocks):
 
     # Clean up after import
     sys.modules.pop("nexent.utils.http_client_manager", None)
+
+
+# Keep the lightweight runtime modules available for create_single_agent()
+# tests.  They exercise runtime selection after the import-time patch.dict
+# context has restored sys.modules, while nexent_agent now performs runtime
+# imports inside create_single_agent().
+sys.modules.setdefault("sdk", mock_sdk_module)
+sys.modules.setdefault("sdk.nexent", mock_sdk_nexent_module)
+sys.modules.setdefault("sdk.nexent.core", mock_sdk_nexent_core_module)
+sys.modules.setdefault("sdk.nexent.core.agents", mock_sdk_nexent_core_agents_module)
+sys.modules.setdefault("sdk.nexent.core.tools", mock_sdk_nexent_core_tools_module)
+sys.modules.setdefault("sdk.nexent.core.context_runtime", mock_sdk_context_runtime_module)
+sys.modules.setdefault("sdk.nexent.core.context_runtime.legacy", mock_sdk_context_runtime_legacy_module)
+sys.modules.setdefault(
+    "sdk.nexent.core.context_runtime.legacy.runtime",
+    mock_sdk_context_runtime_legacy_runtime_module,
+)
+sys.modules.setdefault("sdk.nexent.core.context_runtime.managed", mock_sdk_context_runtime_managed_module)
+sys.modules.setdefault(
+    "sdk.nexent.core.context_runtime.managed.runtime",
+    mock_sdk_context_runtime_managed_runtime_module,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -459,7 +532,9 @@ def test_create_model_success(nexent_agent_with_models, mock_model_config):
     # Verify the result
     assert result == mock_model_instance
 
-    # Verify OpenAIModel was constructed with correct parameters
+    # Verify OpenAIModel was constructed with correct parameters.
+    # W1 renamed the SDK's `max_tokens` kwarg to `max_output_tokens`; the
+    # production code path here builds the same kwarg under the new name.
     mock_openai_model_class.assert_called_once_with(
         observer=nexent_agent_with_models.observer,
         model_id=mock_model_config.model_name,
@@ -471,8 +546,9 @@ def test_create_model_success(nexent_agent_with_models, mock_model_config):
         ssl_verify=True,
         display_name=mock_model_config.cite_name,
         extra_body=mock_model_config.extra_body,
-        max_tokens=mock_model_config.max_tokens,
+        max_output_tokens=mock_model_config.max_tokens,
         timeout_seconds=mock_model_config.timeout_seconds,
+        prompt_cache=mock_model_config.prompt_cache,
     )
 
     # Verify stop_event was set
@@ -491,7 +567,8 @@ def test_create_model_deep_thinking_success(nexent_agent_with_models, mock_deep_
     # Verify the result
     assert result == mock_model_instance
 
-    # Verify OpenAIModel was constructed with correct parameters
+    # Verify OpenAIModel was constructed with correct parameters.
+    # W1 renamed the SDK's `max_tokens` kwarg to `max_output_tokens`.
     mock_openai_model_class.assert_called_once_with(
         observer=nexent_agent_with_models.observer,
         model_id=mock_deep_thinking_model_config.model_name,
@@ -503,8 +580,9 @@ def test_create_model_deep_thinking_success(nexent_agent_with_models, mock_deep_
         ssl_verify=True,
         display_name=mock_deep_thinking_model_config.cite_name,
         extra_body=mock_deep_thinking_model_config.extra_body,
-        max_tokens=mock_deep_thinking_model_config.max_tokens,
+        max_output_tokens=mock_deep_thinking_model_config.max_tokens,
         timeout_seconds=mock_deep_thinking_model_config.timeout_seconds,
+        prompt_cache=mock_deep_thinking_model_config.prompt_cache,
     )
 
     # Verify stop_event was set
@@ -2476,6 +2554,95 @@ class TestCreateLocalToolDify:
         assert result == mock_tool_instance
         assert mock_tool_instance.observer == nexent_agent_instance.observer
         assert mock_tool_instance.rerank_model == "rerank_instance"
+
+
+class TestCreateLocalToolRAGFlow:
+    """Tests for create_local_tool with RAGFlowSearchTool."""
+
+    def test_create_local_tool_ragflow_search_success(self, nexent_agent_instance):
+        """Test successful RAGFlowSearchTool creation filters out unsupported params."""
+        mock_tool_class = MagicMock()
+        mock_tool_instance = MagicMock()
+        mock_tool_class.return_value = mock_tool_instance
+
+        tool_config = ToolConfig(
+            class_name="RAGFlowSearchTool",
+            name="ragflow_search",
+            description="desc",
+            inputs="{}",
+            output_type="string",
+            params={
+                "server_url": "http://localhost:9380",
+                "api_key": "ragflow-key",
+                "dataset_ids": '["ds1"]',
+                "observer": "should_be_filtered",
+                "rerank_model": "should_be_filtered",
+                "rerank": True,
+                "rerank_model_name": "should_be_filtered",
+            },
+            source="local",
+            metadata={"rerank_model": "rerank_display_instance"}
+        )
+
+        original_value = nexent_agent.__dict__.get("RAGFlowSearchTool")
+        nexent_agent.__dict__["RAGFlowSearchTool"] = mock_tool_class
+
+        try:
+            result = nexent_agent_instance.create_local_tool(tool_config)
+        finally:
+            if original_value is not None:
+                nexent_agent.__dict__["RAGFlowSearchTool"] = original_value
+            elif "RAGFlowSearchTool" in nexent_agent.__dict__:
+                del nexent_agent.__dict__["RAGFlowSearchTool"]
+
+        # Verify filtered params are NOT passed to __init__
+        call_kwargs = mock_tool_class.call_args[1]
+        assert "observer" not in call_kwargs
+        assert "rerank_model" not in call_kwargs
+        assert "rerank" not in call_kwargs
+        assert "rerank_model_name" not in call_kwargs
+        # Verify valid params ARE passed
+        assert call_kwargs["server_url"] == "http://localhost:9380"
+        assert call_kwargs["api_key"] == "ragflow-key"
+        assert call_kwargs["dataset_ids"] == '["ds1"]'
+
+        # Verify observer is set post-init
+        assert result == mock_tool_instance
+        assert mock_tool_instance.observer == nexent_agent_instance.observer
+        # Verify rerank_model is set from metadata for display purposes
+        assert mock_tool_instance.rerank_model == "rerank_display_instance"
+
+    def test_create_local_tool_ragflow_search_without_metadata(self, nexent_agent_instance):
+        """Test RAGFlowSearchTool creation when metadata is None or empty."""
+        mock_tool_class = MagicMock()
+        mock_tool_instance = MagicMock()
+        mock_tool_class.return_value = mock_tool_instance
+
+        tool_config = ToolConfig(
+            class_name="RAGFlowSearchTool",
+            name="ragflow_search",
+            description="desc",
+            inputs="{}",
+            output_type="string",
+            params={"server_url": "http://localhost:9380", "api_key": "key"},
+            source="local",
+            metadata=None,
+        )
+
+        original_value = nexent_agent.__dict__.get("RAGFlowSearchTool")
+        nexent_agent.__dict__["RAGFlowSearchTool"] = mock_tool_class
+
+        try:
+            result = nexent_agent_instance.create_local_tool(tool_config)
+        finally:
+            if original_value is not None:
+                nexent_agent.__dict__["RAGFlowSearchTool"] = original_value
+            elif "RAGFlowSearchTool" in nexent_agent.__dict__:
+                del nexent_agent.__dict__["RAGFlowSearchTool"]
+
+        assert result == mock_tool_instance
+        assert mock_tool_instance.observer == nexent_agent_instance.observer
+        assert mock_tool_instance.rerank_model is None
 
 
 class TestCreateLocalToolAnalyze:

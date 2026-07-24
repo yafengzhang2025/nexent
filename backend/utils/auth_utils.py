@@ -6,8 +6,10 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 import jwt
+import httpx
 from fastapi import Request
 from supabase import create_client
+from supabase.lib.client_options import SyncClientOptions
 
 from consts.const import (
     ASSET_OWNER_ROLE,
@@ -249,10 +251,45 @@ def resolve_tenant_id_from_user_tenant_record(user_tenant: Dict[str, Any]) -> st
     return DEFAULT_TENANT_ID
 
 
+def _build_supabase_options() -> SyncClientOptions:
+    """Build ClientOptions for the server-side Supabase client.
+
+    Two things matter here:
+
+    1. ``httpx.Client`` is built with ``trust_env=False`` and ``proxy=None``
+       so Supabase always talks to ``SUPABASE_URL`` directly and does not
+       pick up the Windows system proxy (e.g. Clash on 127.0.0.1:7897),
+       which would otherwise hang local GoTrue calls until timeout.
+
+    2. ``auto_refresh_token=False`` and ``persist_session=False`` disable
+       the supabase-py background refresh tick. The refresh tick calls
+       ``/auth/v1/token?grant_type=refresh_token`` whenever the in-memory
+       session is close to expiry, which is *not* what we want on the
+       backend: the new ``refresh_token`` is rotated server-side but the
+       caller (frontend / BFF) never learns about it. The next frontend
+       refresh attempt then sends the now-consumed ``refresh_token`` and
+       Supabase rejects it with ``refresh_token_already_used``. Keeping
+       the client passive means every refresh must flow through the
+       explicit ``/api/user/refresh_token`` endpoint, which has full
+       ownership of the rotated tokens and updates the cookies atomically.
+    """
+    http_client = httpx.Client(
+        trust_env=False,
+        proxy=None,
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        follow_redirects=True,
+    )
+    return SyncClientOptions(
+        httpx_client=http_client,
+        auto_refresh_token=False,
+        persist_session=False,
+    )
+
+
 def get_supabase_client():
     """Get Supabase client instance with regular key (user-context operations)."""
     try:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
+        return create_client(SUPABASE_URL, SUPABASE_KEY, options=_build_supabase_options())
     except Exception as e:
         logging.error(f"Failed to create Supabase client: {str(e)}")
         return None
@@ -261,7 +298,7 @@ def get_supabase_client():
 def get_supabase_admin_client():
     """Get Supabase client instance with service role key for admin operations."""
     try:
-        return create_client(SUPABASE_URL, SERVICE_ROLE_KEY)
+        return create_client(SUPABASE_URL, SERVICE_ROLE_KEY, options=_build_supabase_options())
     except Exception as e:
         logging.error(f"Failed to create Supabase admin client: {str(e)}")
         return None
@@ -292,15 +329,18 @@ def get_jwt_expiry_seconds(token: str) -> int:
         if DEBUG_JWT_EXPIRE_SECONDS > 0:
             return DEBUG_JWT_EXPIRE_SECONDS
 
-        # Decode JWT token (without signature verification, only parse content)
-        decoded = jwt.decode(jwt_token, options={"verify_signature": False})
+        # Decode JWT token with signature verification. Expiration validation is
+        # disabled intentionally because callers need the original exp/iat span.
+        decoded = _decode_jwt_token_for_expiry(jwt_token)
 
         # Extract expiration time and issued time from JWT claims
-        exp = decoded.get("exp", 0)
-        iat = decoded.get("iat", 0)
+        exp = int(decoded["exp"])
+        iat = int(decoded["iat"])
 
         # Calculate validity period (seconds)
         expiry_seconds = exp - iat
+        if expiry_seconds <= 0:
+            raise ValueError("JWT exp must be greater than iat")
 
         return expiry_seconds
     except Exception as e:
@@ -324,6 +364,24 @@ def calculate_expires_at(token: Optional[str] = None) -> int:
 
     expiry_seconds = get_jwt_expiry_seconds(token) if token else 3600
     return int((datetime.now() + timedelta(seconds=expiry_seconds)).timestamp())
+
+
+def _decode_jwt_token_for_expiry(token: str) -> dict:
+    """
+    Decode JWT claims for session timing after verifying the token signature.
+
+    Expiration validation is intentionally disabled so callers can compute the
+    original token lifetime even when the token is already expired.
+    """
+    if not SUPABASE_JWT_SECRET:
+        raise UnauthorizedError("JWT verification is not configured")
+
+    return jwt.decode(
+        token,
+        SUPABASE_JWT_SECRET,
+        algorithms=["HS256"],
+        options={"verify_exp": False, "verify_aud": False},
+    )
 
 
 def _decode_jwt_token(authorization: str) -> dict:

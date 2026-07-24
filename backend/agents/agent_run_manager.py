@@ -1,9 +1,12 @@
 import logging
 import threading
-from typing import Dict, Union
+from typing import TYPE_CHECKING, Any, Dict, Union
 
 from nexent.core.agents.agent_model import AgentRunInfo
-from nexent.core.agents.agent_context import ContextManager, ContextManagerConfig
+from services.runtime_state_service import runtime_state_service
+
+if TYPE_CHECKING:
+    from nexent.core.agents.agent_context import ContextManager, ContextManagerConfig
 
 logger = logging.getLogger("agent_run_manager")
 
@@ -25,7 +28,7 @@ class AgentRunManager:
             # user_id:conversation_id -> agent_run_info
             self.agent_runs: Dict[str, AgentRunInfo] = {}
             # conversation_id -> ContextManager (conversation-level lifetime)
-            self._conversation_context_managers: Dict[str, ContextManager] = {}
+            self._conversation_context_managers: Dict[str, Any] = {}
             # conversation_id -> active run count for safe cleanup
             self._conversation_run_counts: Dict[str, int] = {}
             self._initialized = True
@@ -43,8 +46,9 @@ class AgentRunManager:
             self._conversation_run_counts[conv_key] = self._conversation_run_counts.get(conv_key, 0) + 1
             logger.info(
                 f"register agent run instance, user_id: {user_id}, conversation_id: {conversation_id}")
+        runtime_state_service.register_run(user_id=user_id, conversation_id=conversation_id)
 
-    def unregister_agent_run(self, conversation_id: Union[int, str], user_id: str):
+    def unregister_agent_run(self, conversation_id: Union[int, str], user_id: str, status: str = "completed"):
         """unregister agent run instance"""
         with self._lock:
             run_key = self._get_run_key(conversation_id, user_id)
@@ -59,6 +63,7 @@ class AgentRunManager:
             else:
                 logger.info(
                     f"no agent run instance found for user_id: {user_id}, conversation_id: {conversation_id}")
+        runtime_state_service.mark_run_finished(user_id=user_id, conversation_id=conversation_id, status=status)
 
     def get_agent_run_info(self, conversation_id: Union[int, str], user_id: str):
         """get agent run instance"""
@@ -67,21 +72,27 @@ class AgentRunManager:
 
     def stop_agent_run(self, conversation_id: Union[int, str], user_id: str) -> bool:
         """stop agent run for specified conversation_id and user_id"""
+        remote_signal_set = runtime_state_service.set_cancel_signal(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
         agent_run_info = self.get_agent_run_info(conversation_id, user_id)
         if agent_run_info is not None:
             agent_run_info.stop_event.set()
             logger.info(
                 f"agent run stopped, user_id: {user_id}, conversation_id: {conversation_id}")
             return True
-        return False
+        return remote_signal_set
 
     def get_or_create_context_manager(
         self,
         conversation_id: Union[int, str],
-        config: ContextManagerConfig,
+        config: "ContextManagerConfig",
         max_steps: int
-    ) -> ContextManager:
+    ) -> "ContextManager":
         """Get or create a conversation-level ContextManager instance."""
+        from nexent.core.agents.agent_context import ContextManager
+
         conv_key = str(conversation_id)
         with self._lock:
             cm = self._conversation_context_managers.get(conv_key)

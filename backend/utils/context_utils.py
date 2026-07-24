@@ -181,8 +181,11 @@ def _format_skills_description(
         lines.append("")
         lines.append("3. **遵循技能指南**：技能内容注入后，严格按其中的步骤执行。不要跳过技能指南中的步骤，也不要用自行编写的代码替代技能定义的流程。")
         lines.append("")
-        lines.append("4. **执行技能脚本**：如果技能指南中引用了附加脚本（形如 `<use_script path=\"script_path\" />`），使用以下格式调用：")
-        lines.append("   代码：")
+        lines.append("4. **执行技能脚本**：技能中引用的脚本（参考文档、脚本声明）可通过以下任一形式表达，**功能上完全等同**，模型必须把它们都识别为路径声明：")
+        lines.append("   - XML 标签形式：`<use_script path=\"script_path\" />`、`<reference path=\"file_path\" />`")
+        lines.append("   - 单个反引号包裹：`` `scripts/analyze.py` ``、`` `reference/api_doc` ``")
+        lines.append("   - 三重反引号代码块：`` ```scripts/analyze.py``` ``（当代码块内仅有单行路径时）")
+        lines.append("   调用 `run_skill_script` 时，`script_path` **始终相对于技能根目录**解析（平台行为，不是当前工作目录），常见形式如下：")
         lines.append("   <code>")
         lines.append("   result = run_skill_script(\"skill_name\", \"script_path\")")
         lines.append("   print(result)")
@@ -193,13 +196,20 @@ def _format_skills_description(
         lines.append("   result = run_skill_script(\"skill_name\", \"script_path\", \"--param1 value1 --flag\")")
         lines.append("   print(result)")
         lines.append("   </code>")
-        lines.append("   注意：只执行技能指南中明确声明的脚本路径，绝不自行构造脚本路径。")
+        lines.append("   注意：")
+        lines.append("   - 只执行技能指南中明确声明的脚本路径，绝不自行构造脚本路径。")
+        lines.append("   - 不要把脚本当作当前工作目录（CWD）的相对路径处理；也不要使用绝对路径。")
+        lines.append("   - 当脚本不存在时，返回的错误信息中会列出该技能根目录下的可用脚本，请据此修正路径。")
         lines.append("")
         lines.append("5. **整合输出**：根据技能指南要求的输出格式，结合脚本执行结果生成最终回答。")
         lines.append("")
-        lines.append("6. **引用场景处理**：当技能内容中出现引用标记或需要引用其他文件时，需要识别并再次调用 read_skill_md：")
-        lines.append("   - **引用模板识别**：注意技能内容中形如 `<reference path=\"script_path\" />` 或自然语言式的引用声明（如\"详见 examples.md\"、\"请参考 reference/api_doc\"）")
-        lines.append("   - **自动补全**：发现引用后，尝试读取被引用的文件获取更多信息")
+        lines.append("6. **引用场景处理**：技能中的引用既可以通过 XML 标签表达，也可以通过下列 Markdown 语法表达，**功能上完全等同**，必须都能识别：")
+        lines.append("   - **引用模板识别**：")
+        lines.append("     - XML 形式：`<reference path=\"file_path\" />`")
+        lines.append("     - 单个反引号形式：`` `examples.md` ``、`` `reference/api_doc` ``")
+        lines.append("     - 三重反引号代码块形式：`` ```examples.md``` ``（当代码块内仅有单行路径时）")
+        lines.append("     - 自然语言式的引用声明（如\"详见 examples.md\"、\"请参考 reference/api_doc\"）")
+        lines.append("   - **自动补全**：发现引用后，按需调用 `read_skill_md(\"skill_name\", [\"<路径>\"])` 读取被引用的文件，**不要一次性全部读取**，应基于当前任务判断哪些文件确实必要。")
         lines.append("   - **示例**：")
         lines.append("   <code>")
         lines.append("   # 技能内容提示\"请参考 examples.md 获取详细示例\"")
@@ -235,7 +245,11 @@ def _format_skills_description(
         lines.append("")
         lines.append("3. **Follow Skill Guide**: After skill content is injected, strictly follow its steps. Do not skip steps or replace with your own code.")
         lines.append("")
-        lines.append("4. **Execute Skill Script**: If the skill guide references additional scripts (like `<use_script path=\"script_path\" />`), call:")
+        lines.append("4. **Execute Skill Script**: Skill-internal references (for both documentation and scripts) may be declared with **any of the following equivalent forms** - treat them all the same way: ")
+        lines.append("   - XML tags: `<use_script path=\"script_path\" />`, `<reference path=\"file_path\" />`")
+        lines.append("   - Single inline backticks: `` `scripts/analyze.py` ``, `` `reference/api_doc` ``")
+        lines.append("   - Triple-backtick fenced code blocks: `` ```scripts/analyze.py``` `` (only when the block body is a single path line)")
+        lines.append("   When calling `run_skill_script`, the `script_path` is **always resolved relative to the skill's root directory** (this is the platform behaviour, not the agent's CWD). Common forms:")
         lines.append("   <code>")
         lines.append("   result = run_skill_script(\"skill_name\", \"script_path\")")
         lines.append("   print(result)")
@@ -246,13 +260,17 @@ def _format_skills_description(
         lines.append("   result = run_skill_script(\"skill_name\", \"script_path\", \"--param1 value1 --flag\")")
         lines.append("   print(result)")
         lines.append("   </code>")
-        lines.append("   Note: Only execute script paths explicitly declared in the skill guide. Never construct paths yourself.")
+        lines.append("   Note: Only execute script paths explicitly declared in the skill guide. Never construct paths yourself. Do not treat the script as relative to the current working directory (CWD), and never pass absolute paths. When the requested script cannot be found, the error returned by `run_skill_script` lists the scripts that *do* exist under the skill root - use it to correct the path.")
         lines.append("")
         lines.append("5. **Integrate Output**: Generate the final answer based on the skill guide's output format and script execution results.")
         lines.append("")
-        lines.append("6. **Handle References**: When the skill content has reference markers or needs to reference other files, identify and call read_skill_md again:")
-        lines.append("   - **Reference template recognition**: Look for patterns like `<reference path=\"file_path\" />` or natural-language references (\"see examples.md\", \"refer to reference/api_doc\")")
-        lines.append("   - **Auto-complete**: After discovering a reference, try reading the referenced file for more info")
+        lines.append("6. **Handle References**: Skill-internal references can be expressed using XML tags, markdown forms, or natural-language hints. All three are **functionally equivalent** and must be recognised: ")
+        lines.append("   - **Reference patterns to recognise**:")
+        lines.append("     - XML tag form: `<reference path=\"file_path\" />`")
+        lines.append("     - Single inline backtick form: `` `examples.md` ``, `` `reference/api_doc` ``")
+        lines.append("     - Triple-backtick fenced block form: `` ```examples.md``` `` (only when the block body is a single path line)")
+        lines.append("     - Natural-language references (\"see examples.md\", \"refer to reference/api_doc\")")
+        lines.append("   - **Auto-complete**: After discovering a reference, call `read_skill_md(\"skill_name\", [\"<path>\"])` only for the files you actually need. Do **not** load every referenced file blindly - decide based on the current task which references matter.")
         lines.append("   - **Example**:")
         lines.append("   <code>")
         lines.append("   # Skill content says \"see examples.md for detailed examples\"")
@@ -265,7 +283,6 @@ def _format_skills_description(
 
 def _format_tools_description(
     tools: Dict[str, Any],
-    knowledge_base_summary: Optional[str] = None,
     language: str = "zh",
     is_manager: bool = True,
 ) -> str:
@@ -278,9 +295,15 @@ def _format_tools_description(
     """
     if not tools:
         no_tools_msg = "- 当前没有可用的工具" if language == "zh" else "- No tools are currently available"
-        return no_tools_msg
+        prefix = "1. 工具\n" if language == "zh" else "1. Tools\n"
+        return prefix + no_tools_msg
 
     lines = []
+
+    if language == "zh":
+        lines.append("1. 工具")
+    else:
+        lines.append("1. Tools")
 
     if language == "zh":
         lines.append("- 你只能使用以下工具，不得使用任何其他工具：")
@@ -318,15 +341,6 @@ def _format_tools_description(
                 lines.append(f"- {name}: {desc}")
                 lines.append(f"   Accepts input: {inputs}")
                 lines.append(f"   Returns output type: {output_type}")
-
-    # Knowledge base summary
-    if knowledge_base_summary:
-        if language == "zh":
-            lines.append("- knowledge_base_search工具只能使用以下知识库索引，请根据用户问题选择最相关的一个或多个知识库索引：")
-            lines.append(f" {knowledge_base_summary}")
-        else:
-            lines.append("- knowledge_base_search tool can only use the following knowledge base indexes, please select the most relevant one or more knowledge base indexes based on the user's question:")
-            lines.append(f" {knowledge_base_summary}")
 
     # File URL usage guide
     lines.append("")
@@ -373,6 +387,11 @@ def _format_managed_agents_description(
         return ""
 
     lines = []
+
+    if language == "zh":
+        lines.append("2. 助手")
+    else:
+        lines.append("2. Agents")
 
     if language == "zh":
         lines.append("你可以使用以下内部助手（通过函数调用方式协作）：")
@@ -461,6 +480,7 @@ def _format_external_agents_description(
 def _format_skills_usage_requirements(
     skills: List[Dict[str, str]],
     language: str = "zh",
+    is_manager: bool = True,
 ) -> str:
     """Format skills usage requirements section.
 
@@ -469,9 +489,15 @@ def _format_skills_usage_requirements(
     """
     if not skills:
         no_skills_msg = "- 当前没有可用的技能" if language == "zh" else "- No skills are currently available"
-        return no_skills_msg
+        prefix = "3. 技能\n" if language == "zh" else "3. Skills\n"
+        return prefix + no_skills_msg
 
     lines = []
+
+    if language == "zh":
+        lines.append("3. 技能")
+    else:
+        lines.append("3. Skills")
 
     if language == "zh":
         lines.append("- 你拥有上述 `<available_skills>` 中列出的技能。技能中引用的脚本通过 `run_skill_script()` 函数调用，该函数由平台提供，不需要导入。")
@@ -479,7 +505,11 @@ def _format_skills_usage_requirements(
         lines.append("### 技能使用要求")
         lines.append("1. **技能优先**：如果用户请求匹配了某个技能的 description，必须先调用 `read_skill_md()` 加载技能指南，再按指南执行。不得跳过技能自行编写代码解决。")
         lines.append("2. **忠实执行**：读取技能内容后，严格按技能指南中的步骤操作。不要自行修改流程、跳过步骤或用通用代码替代技能定义的流程。")
-        lines.append("3. **脚本调用规范**：只使用 `run_skill_script` 工具执行技能指南中明确要求的脚本。传入的 `skill_name` 和 `script_path` 必须与技能指南中的声明完全一致，不要自行拼接或猜测路径。如果需要附加参数，将参数以命令行字符串形式传递给`run_skill_script`。")
+        lines.append("3. **脚本调用规范**：")
+        lines.append("   - 路径声明识别：技能指南中的脚本路径既可以以 XML 标签（`<use_script path=\"...\" />`）声明，也允许以等价的 Markdown 形式（`` `scripts/foo.py` `` 单反引号，或 `` ```scripts/foo.py``` `` 三重反引号代码块）声明。模型必须把这些形式都识别为脚本路径。")
+        lines.append("   - 路径解析：`run_skill_script` 的 `script_path` 参数**始终相对于技能根目录**解析，平台不会基于当前工作目录或绝对路径查找。请直接复用技能指南中的声明字符串，不要自行拼接或猜测路径。")
+        lines.append("   - 参数传递：如果需要附加参数，将参数以命令行字符串形式传递给 `run_skill_script`。")
+        lines.append("   - 错误回退：脚本不存在时，`run_skill_script` 返回的错误信息会列出当前技能根目录下可用的脚本路径，请据此修正。")
         lines.append("4. **失败回退**：如果 `read_skill_md` 返回错误或 `run_skill_script` 执行失败，向用户说明情况，并尝试用通用推理模式提供替代方案。")
         lines.append("5. **技能组合**：如果一个任务需要多个技能配合，按逻辑依赖顺序依次加载和执行，前一个技能的输出可作为后一个技能的输入。")
     else:
@@ -488,7 +518,11 @@ def _format_skills_usage_requirements(
         lines.append("### Skill Usage Requirements")
         lines.append("1. **Skill Priority**: If a user request matches a skill's description, you must first call `read_skill_md()` to load the skill guide, then execute per the guide. Do not skip skills and write your own code.")
         lines.append("2. **Faithful Execution**: After reading skill content, strictly follow the skill guide's steps. Do not modify the flow, skip steps, or replace with generic code.")
-        lines.append("3. **Script Calling Specification**: Only use `run_skill_script` to execute scripts explicitly required in the skill guide. The `skill_name` and `script_path` must match the skill guide's declaration exactly. Do not construct or guess paths. For extra params, pass them as a command-line string to `run_skill_script`.")
+        lines.append("3. **Script Calling Specification**:")
+        lines.append("   - **Path declaration recognition**: A script path inside the skill guide may be declared using XML tags (`<use_script path=\"...\" />`) OR via the equivalent markdown forms - single inline backticks like `` `scripts/foo.py` ``, or triple-backtick fenced blocks like `` ```scripts/foo.py``` ``. Treat all three as the same kind of declaration.")
+        lines.append("   - **Path resolution**: The `script_path` argument of `run_skill_script` is **always resolved relative to the skill's root directory**. The platform will not look in the current working directory and will not follow absolute paths. Pass the path verbatim from the skill guide - never construct or guess a path.")
+        lines.append("   - **Parameter passing**: For extra parameters, pass them as a command-line string to `run_skill_script`.")
+        lines.append("   - **Error fallback**: When the script cannot be located, the error returned by `run_skill_script` lists the scripts that *do* exist under the skill root - use it to correct the path.")
         lines.append("4. **Failure Fallback**: If `read_skill_md` returns an error or `run_skill_script` fails, explain to the user and try to provide an alternative via general reasoning mode.")
         lines.append("5. **Skill Combination**: If a task needs multiple skills, load and execute in logical dependency order. The output of one skill can be input to the next.")
 
@@ -533,7 +567,8 @@ def build_skeleton_header_component(
     """Build SystemPromptComponent for the header section.
 
     Section: "### 基本信息" / "### Basic Information"
-    Content: Agent identity, app name/description, user_id.
+    Content: Agent identity and app name/description.  User identity is
+    request-scoped data and must not enter the managed stable prefix.
     Note: Current time is intentionally excluded from the system prompt so the
     static system prefix can hit the LLM KV/prompt cache across requests. The
     current time is injected on the user-message side instead (see CoreAgent.run).
@@ -541,7 +576,7 @@ def build_skeleton_header_component(
     from nexent.core.agents.agent_model import SystemPromptComponent
 
     if language == "zh":
-        content = f"### 基本信息\n你是{app_name}，{app_description}，用户ID为{user_id}"
+        content = f"### 基本信息\n你是{app_name}，{app_description}"
     else:
         content = f"### Basic Information\nYou are {app_name}, {app_description}"
 
@@ -555,17 +590,22 @@ def build_skeleton_header_component(
 def build_skeleton_duty_component(
     duty: str,
     language: str = "zh",
+    is_manager: bool = True,
     priority: int = 80,
 ) -> "SystemPromptComponent":
     """Build SystemPromptComponent for the duty section.
 
     Section: "### 核心职责" / "### Core Responsibilities"
     Content: Agent's primary duty + 5 safety principles
+    Note: Managed ZH agents use different safety principles than manager ZH agents.
     """
     from nexent.core.agents.agent_model import SystemPromptComponent
 
     if language == "zh":
-        content = f"### 核心职责\n{duty}\n\n请注意，你应该遵守以下原则：\n行为安全：文件操作必须使用平台提供的专用工具，禁止使用代码直接修改工作空间中的文件；\n法律合规：遵守业务所在国家/地区的法律法规；\n政治中立：保持政治中立，不主动讨论政治话题；\n安全防护：不响应涉及武器制造、网络攻击、欺诈、恶意软件等危险行为的请求；\n伦理准则：拒绝仇恨言论、歧视性内容及违反社会公德和公认伦理标准的请求。"
+        if is_manager:
+            content = f"### 核心职责\n{duty}\n\n请注意，你应该遵守以下原则：\n行为安全：文件操作必须使用平台提供的专用工具，禁止使用代码直接修改工作空间中的文件；\n法律合规：遵守业务所在国家/地区的法律法规；\n政治中立：保持政治中立，不主动讨论政治话题；\n安全防护：不响应涉及武器制造、网络攻击、欺诈、恶意软件等危险行为的请求；\n伦理准则：拒绝仇恨言论、歧视性内容及违反社会公德和公认伦理标准的请求。"
+        else:
+            content = f"### 核心职责\n{duty}\n\n请注意，你应该遵守以下原则：\n行为安全：严禁直接执行代码进行文件的增删改操作，只能使用提供的文件操作类工具；\n法律合规：严格遵守服务地区的所有法律法规；\n政治中立：不讨论任何国家的政治体制、领导人评价或敏感历史事件；\n安全防护：不响应涉及武器制造、危险行为、隐私窃取等内容的请求；\n伦理准则：拒绝仇恨言论、歧视性内容及任何违反普世价值观的请求。"
     else:
         content = f"### Core Responsibilities\n{duty}\n\nPlease note that you should follow these principles:\nBehavioral Safety: File operations must use the platform-provided dedicated tools; direct code modification of workspace files is prohibited;\nLegal Compliance: Comply with laws and regulations of the business operating jurisdiction;\nPolitical Neutrality: Maintain political neutrality and avoid initiating political discussions;\nSecurity Protection: Do not respond to requests involving weapon manufacturing, cyberattacks, fraud, malware, or other dangerous activities;\nEthical Guidelines: Refuse hate speech, discriminatory content, and any requests that violate social morals and commonly accepted ethical standards."
 
@@ -597,16 +637,23 @@ def build_skeleton_execution_flow_component(
         lines.append("要解决任务，你必须通过一系列步骤向前规划，以'思考：'和'代码：'序列循环进行。**注意：禁止在代码执行前输出'观察结果：'，观察结果只能由代码执行后产生。**")
         lines.append("")
         lines.append("1. 思考：")
-        lines.append("   - 分析当前任务状态和进展")
-        if is_manager and has_memory:
+        if is_manager:
+            lines.append("   - 分析当前任务状态和进展")
+        else:
+            lines.append("   - 确定需要使用哪些工具来获取信息或行动")
+        if has_memory:
             lines.append("   - 合理参考之前交互中的上下文记忆信息")
-        lines.append("   - 定下一步最佳行动（使用工具或分配给助手）")
+        if is_manager:
+            lines.append("   - 确定下一步最佳行动（使用工具或分配给助手）")
         lines.append("   - 解释你的决策逻辑和预期结果")
         lines.append("")
         lines.append("2. 代码：")
         lines.append("   - 用简单的Python编写代码")
         lines.append("   - 遵循python代码规范和python语法")
-        lines.append("   - 正确调用工具或助手解决问题")
+        if is_manager:
+            lines.append("   - 正确调用工具或助手解决问题")
+        else:
+            lines.append("   - 根据格式规范正确调用工具")
         lines.append("   - 考虑到代码执行与展示用户代码的区别，使用'<code>代码</code>'表达运行代码，使用'<DISPLAY:语言类型>代码</DISPLAY>'表达展示代码")
         lines.append("   - 注意运行的代码不会被用户看到，所以如果用户需要看到代码，你需要使用'<DISPLAY:语言类型>代码</DISPLAY>'表达展示代码。")
         lines.append("   - **重要**：代码执行后，系统会返回 \"Observation:\" 标记的内容（这是真实的执行结果）。请基于这些真实结果继续下一步思考，**不要在代码执行前自行编造观察结果**。")
@@ -638,21 +685,31 @@ def build_skeleton_execution_flow_component(
         lines.append("  - 避免在Markdown中使用HTML标签，优先使用Markdown原生语法")
         lines.append("  - 代码块中的代码应保持原始格式，不要添加额外的转义字符")
         lines.append("  - 若未使用检索工具，则不添加任何引用标记")
+        if not is_manager:
+            lines.append("")
+            lines.append("注意最后生成的回答要语义连贯，信息清晰，可读性高。")
     else:
         lines = ["### Execution Process"]
         lines.append("To solve tasks, you must plan forward through a series of steps in a loop of 'Think:' and 'Code:' sequences. **IMPORTANT: You must NOT output 'Observe Results:' before code execution. Observation results can ONLY be generated after code execution.**")
         lines.append("")
         lines.append("1. Think:")
-        lines.append("   - Analyze current task status and progress")
-        if is_manager and has_memory:
+        if is_manager:
+            lines.append("   - Analyze current task status and progress")
+        else:
+            lines.append("   - Determine which tools need to be used to obtain information or take action")
+        if has_memory:
             lines.append("   - Reference relevant contextual memories from previous interactions when applicable")
-        lines.append("   - Determine the best next action (use tools or delegate to agents)")
+        if is_manager:
+            lines.append("   - Determine the best next action (use tools or delegate to agents)")
         lines.append("   - Explain your decision logic and expected results")
         lines.append("")
         lines.append("2. Code:")
         lines.append("   - Write code in simple Python")
         lines.append("   - Follow Python coding standards and Python syntax")
-        lines.append("   - Correctly call tools or agents to solve problems")
+        if is_manager:
+            lines.append("   - Correctly call tools or agents to solve problems")
+        else:
+            lines.append("   - Call tools correctly according to format specifications")
         lines.append("   - To distinguish between code execution and displaying user code, use '<code>code</code>' for executing code and '<DISPLAY:language_type>code</DISPLAY>' for displaying code")
         lines.append("   - Note that executed code is not visible to users. If users need to see the code, use '<DISPLAY:language_type>code</DISPLAY>' for displaying code.")
         lines.append("   - **IMPORTANT**: After code execution, the system will return content with \"Observation:\" marker (this is the real execution result). Please continue your next thinking based on these real results. **Do NOT fabricate observation results before code execution.**")
@@ -684,6 +741,9 @@ def build_skeleton_execution_flow_component(
         lines.append("   - Avoid using HTML tags in Markdown, prioritize native Markdown syntax")
         lines.append("   - Code in code blocks should maintain original format, do not add extra escape characters")
         lines.append("   - If no retrieval tools are used, do not add any reference marks")
+        if not is_manager:
+            lines.append("")
+            lines.append("Note that the final generated answer should be semantically coherent, with clear information and high readability.")
 
     content = "\n".join(lines)
 
@@ -792,6 +852,35 @@ def build_skeleton_footer_component(
     )
 
 
+def build_available_resources_header_component(
+    is_manager: bool = True,
+    language: str = "zh",
+    priority: int = 55,
+) -> "SystemPromptComponent":
+    """Build SystemPromptComponent for the Available Resources section header.
+
+    Manager agents get a preamble restricting resources; managed agents get only the heading.
+    """
+    from nexent.core.agents.agent_model import SystemPromptComponent
+
+    if language == "zh":
+        if is_manager:
+            content = "### 可用资源\n你只能使用以下资源，不得使用任何其他工具或助手："
+        else:
+            content = "### 可用资源"
+    else:
+        if is_manager:
+            content = "### Available Resources\nYou can only use the following resources, and may not use any other tools or agents:"
+        else:
+            content = "### Available Resources"
+
+    return SystemPromptComponent(
+        content=content,
+        template_name="available_resources_header",
+        priority=priority,
+    )
+
+
 # =============================================================================
 # SECTION 3: Piecewise component builders (existing, enhanced)
 # =============================================================================
@@ -840,7 +929,6 @@ def build_tools_component(
 
     formatted_desc = _format_tools_description(
         tools,
-        knowledge_base_summary=knowledge_base_summary,
         language=language,
         is_manager=is_manager,
     )
@@ -923,6 +1011,7 @@ def build_knowledge_base_component(
     knowledge_base_summary: str,
     kb_ids: Optional[List[str]] = None,
     priority: int = 10,
+    language: str = "zh",
 ) -> "KnowledgeBaseComponent":
     """Build KnowledgeBaseComponent from knowledge base summary.
 
@@ -930,14 +1019,24 @@ def build_knowledge_base_component(
         knowledge_base_summary: Summary text from knowledge bases
         kb_ids: List of knowledge base IDs used
         priority: Component priority for selection
+        language: Language code ('zh' or 'en')
 
     Returns:
         KnowledgeBaseComponent instance
     """
     from nexent.core.agents.agent_model import KnowledgeBaseComponent
 
+    if knowledge_base_summary:
+        if language == "zh":
+            guidance = "knowledge_base_search 工具只能使用以下知识库索引，请根据用户的问题选择最相关的一个或多个知识库索引：\n"
+        else:
+            guidance = "knowledge_base_search tool can only use the following knowledge base indexes, please select the most relevant one or more knowledge base indexes based on the user's question:\n"
+        prefixed_summary = guidance + knowledge_base_summary
+    else:
+        prefixed_summary = knowledge_base_summary
+
     return KnowledgeBaseComponent(
-        summary=knowledge_base_summary,
+        summary=prefixed_summary,
         kb_ids=kb_ids or [],
         priority=priority,
     )
@@ -1056,9 +1155,10 @@ def build_system_prompt_component(
 def build_skills_usage_component(
     skills: List[Dict[str, str]],
     language: str = "zh",
+    is_manager: bool = True,
     priority: int = 40,
-) -> "SystemPromptComponent":
-    """Build SystemPromptComponent for skills usage requirements.
+) -> "SkillsComponent":
+    """Build SkillsComponent for skills usage requirements.
 
     This is a skeleton-like component but its content depends on
     whether skills exist, so it's built dynamically.
@@ -1066,17 +1166,18 @@ def build_skills_usage_component(
     Args:
         skills: List of skill dicts
         language: Language code ('zh' or 'en')
+        is_manager: Whether this is a manager agent
         priority: Component priority
 
     Returns:
-        SystemPromptComponent instance
+        SkillsComponent instance
     """
-    from nexent.core.agents.agent_model import SystemPromptComponent
+    from nexent.core.agents.agent_model import SkillsComponent
 
-    content = _format_skills_usage_requirements(skills, language=language)
-    return SystemPromptComponent(
-        content=content,
-        template_name="skills_usage",
+    content = _format_skills_usage_requirements(skills, language=language, is_manager=is_manager)
+    return SkillsComponent(
+        skills=skills,
+        formatted_description=content,
         priority=priority,
     )
 
@@ -1150,20 +1251,22 @@ def build_context_components(
     Piecewise assembly: Each semantic section is emitted as a dedicated
     ContextComponent, assembled in the exact order matching Jinja2 templates.
 
-    Assembly order (12 sections):
+    Assembly order (15 sections):
       1. Header (基本信息)
       2. Memory (上下文记忆) - if memory_list exists
       3. Duty (核心职责 + 安全准则)
       4. Skills (可用技能 + 6步流程) - if skills exist
       5. Execution Flow (执行流程 + 输出规范)
-      6. Tools (可用资源/1. 工具 + 文件链接指南)
-      7. Managed Agents (可用资源/2. 助手) - if managed_agents exist
-      8. External Agents (外部助手) - if external_a2a_agents exist
-      9. Agent Fallback (当前没有可用的助手) - if no agents
-     10. Skills Usage (可用资源/3. 技能 + 使用要求)
-     11. Constraint (资源使用要求)
-     12. Code Norms (python代码规范)
-     13. Footer (示例模板 + 结尾)
+      6. Available Resources Header (可用资源 heading)
+      7. Tools (可用资源/1. 工具 + 文件链接指南)
+      8. Knowledge Base (知识库) - if knowledge_base_summary exists
+      9. Managed Agents (可用资源/2. 助手) - if managed_agents exist
+     10. External Agents (外部助手) - if external_a2a_agents exist
+     11. Agent Fallback (当前没有可用的助手) - if no agents
+     12. Skills Usage (可用资源/3. 技能 + 使用要求)
+     13. Constraint (资源使用要求)
+     14. Code Norms (python代码规范)
+     15. Footer (示例模板 + 结尾)
 
     Note: The a330d815 short-circuit (if system_prompt: return [single])
     has been REMOVED. All callers must provide raw params for piecewise assembly.
@@ -1222,6 +1325,7 @@ def build_context_components(
             build_skeleton_duty_component(
                 duty=duty,
                 language=language,
+                is_manager=is_manager,
             )
         )
 
@@ -1234,27 +1338,49 @@ def build_context_components(
             )
         )
 
-    # 5. Execution Flow
+    # 5. Execution Flow.  Do not make stable instructions depend on whether a
+    # particular request happened to retrieve memory.
     components.append(
         build_skeleton_execution_flow_component(
-            memory_list=memory_list,
+            memory_list=None,
             language=language,
             is_manager=is_manager,
         )
     )
 
-    # 6. Tools + File URL Guide
+    # 6. Available Resources Header
+    components.append(
+        build_available_resources_header_component(
+            is_manager=is_manager,
+            language=language,
+        )
+    )
+
+    # 7. Tools + File URL Guide
     if include_tools and tools:
         components.append(
             build_tools_component(
                 tools=tools,
-                knowledge_base_summary=knowledge_base_summary,
+                # KB/RAG content is dynamic evidence and is emitted below as a
+                # user-role KnowledgeBaseComponent, not embedded in stable tool
+                # descriptions.
+                knowledge_base_summary=None,
                 language=language,
                 is_manager=is_manager,
             )
         )
 
-    # 7. Managed Agents (if exists) - manager only
+    # 8. Knowledge Base (if exists)
+    if include_knowledge_base and knowledge_base_summary:
+        components.append(
+            build_knowledge_base_component(
+                knowledge_base_summary=knowledge_base_summary,
+                kb_ids=kb_ids,
+                language=language,
+            )
+        )
+
+    # 9. Managed Agents (if exists) - manager only
     if is_manager and include_managed_agents and managed_agents:
         components.append(
             build_managed_agents_component(
@@ -1263,7 +1389,7 @@ def build_context_components(
             )
         )
 
-    # 8. External Agents (if exists) - manager only
+    # 10. External Agents (if exists) - manager only
     if is_manager and include_external_agents and external_a2a_agents:
         components.append(
             build_external_agents_component(
@@ -1272,7 +1398,7 @@ def build_context_components(
             )
         )
 
-    # 9. Agent Fallback (if no agents available) - manager only
+    # 11. Agent Fallback (if no agents available) - manager only
     if is_manager and not managed_agents and not external_a2a_agents:
         fallback_comp = build_agent_fallback_component(
             managed_agents=managed_agents or {},
@@ -1282,16 +1408,17 @@ def build_context_components(
         if fallback_comp.content:  # Only add if has content
             components.append(fallback_comp)
 
-    # 10. Skills Usage Requirements
+    # 12. Skills Usage Requirements
     if include_skills:
         components.append(
             build_skills_usage_component(
                 skills=skills or [],
                 language=language,
+                is_manager=is_manager,
             )
         )
 
-    # 11. Constraint
+    # 13. Constraint
     if constraint:
         components.append(
             build_skeleton_constraint_component(
@@ -1300,7 +1427,7 @@ def build_context_components(
             )
         )
 
-    # 12. Code Norms
+    # 14. Code Norms
     components.append(
         build_skeleton_code_norms_component(
             language=language,
@@ -1308,7 +1435,7 @@ def build_context_components(
         )
     )
 
-    # 13. Footer
+    # 15. Footer
     if few_shots:
         components.append(
             build_skeleton_footer_component(

@@ -3,7 +3,11 @@ from typing import Dict, List
 import asyncio
 from consts.const import DEFAULT_LLM_MAX_TOKENS
 from consts.provider import DASHSCOPE_GET_URL
-from services.providers.base import AbstractModelProvider, _classify_provider_error
+from services.providers.base import (
+    AbstractModelProvider,
+    _classify_provider_error,
+    _extract_capacity_hints_from_raw,
+)
 
 
 DASHSCOPE_IMAGE_GENERATION_KEYWORDS = (
@@ -31,6 +35,10 @@ DASHSCOPE_IMAGE_UNDERSTANDING_KEYWORDS = (
     "qwen-3.6",
 )
 DASHSCOPE_VIDEO_UNDERSTANDING_KEYWORDS = ("omni", "video-understanding", "video-ocr")
+
+
+def _extract_capacity_hints(raw: Dict) -> Dict:
+    return _extract_capacity_hints_from_raw(raw, nested_keys=("inference_metadata",))
 
 
 def _modality_set(value) -> set:
@@ -63,15 +71,19 @@ def _is_dashscope_video_understanding_model(model_id: str, desc: str, req_mods: 
 
 
 def _is_dashscope_image_understanding_model(model_id: str, desc: str, req_mods: set, res_mods: set) -> bool:
-    searchable_text = f"{model_id} {desc.lower()}"
-    if _is_dashscope_image_generation_model(model_id, desc, req_mods, res_mods):
-        return False
-    if _is_dashscope_video_understanding_model(model_id, desc, req_mods, res_mods):
-        return False
-    if ("image" in req_mods or "video" in req_mods) and "text" in res_mods:
+    """Determine if model is for image understanding.
+
+    A model qualifies for image understanding if:
+    - Its output is text AND input contains image or video (multimodal image understanding), OR
+    - Model ID explicitly matches image-understanding keywords.
+
+    Note: This check is independent of video/image-generation classification.
+    A model that is also a video model (vlm3) can simultaneously be an image model (vlm).
+    """
+    if "text" in res_mods and ("image" in req_mods or "video" in req_mods):
         return True
     return _is_dashscope_explicit_image_understanding_model(model_id) or _has_keyword(
-        searchable_text, DASHSCOPE_IMAGE_UNDERSTANDING_KEYWORDS
+        model_id, DASHSCOPE_IMAGE_UNDERSTANDING_KEYWORDS
     )
 
 
@@ -134,9 +146,10 @@ class DashScopeModelProvider(AbstractModelProvider):
                 "stt": []  # Maps to "stt"
             }
 
-            # Classify models and inject canonical fields expected downstream
+            # Classify models into multiple buckets based on capabilities.
+            # A model can belong to more than one bucket (e.g., a model that
+            # accepts Image+Video+Text and returns Text is both vlm3, vlm, and llm).
             for model_obj in all_models:
-                # Extract key fields for logical determination (lowercased for robustness)
                 m_id = model_obj.get('model', '').lower()
                 desc = model_obj.get('description', '')
                 metadata = model_obj.get('inference_metadata') or {}
@@ -155,6 +168,7 @@ class DashScopeModelProvider(AbstractModelProvider):
                     "model_type": "",
                     "max_tokens": DEFAULT_LLM_MAX_TOKENS
                 }
+                cleaned_model.update(_extract_capacity_hints(model_obj))
                # 1. Embedding
                 if 'embedding' in m_id.lower() or '向量' in desc:
                     cleaned_model.update({"model_tag": "embedding", "model_type": "embedding"})
@@ -179,26 +193,28 @@ class DashScopeModelProvider(AbstractModelProvider):
                     categorized_models['tts'].append(cleaned_model)
                     continue
 
-                # 5. VLM
-                if _is_dashscope_video_understanding_model(m_id, desc, req_mods, res_mods):
-                    cleaned_model.update({"model_tag": "chat", "model_type": "vlm3"})
-                    categorized_models['vlm3'].append(cleaned_model)
-                    continue
-
+                # Multimodal / general-purpose types - non-exclusive, no continue.
+                # Each check is independent; one model can qualify for multiple buckets.
                 if _is_dashscope_image_generation_model(m_id, desc, req_mods, res_mods):
-                    cleaned_model.update({"model_tag": "chat", "model_type": "vlm2"})
-                    categorized_models['vlm2'].append(cleaned_model)
-                    continue
+                    vlm2_model = cleaned_model.copy()
+                    vlm2_model.update({"model_tag": "chat", "model_type": "vlm2"})
+                    categorized_models['vlm2'].append(vlm2_model)
+
+                if _is_dashscope_video_understanding_model(m_id, desc, req_mods, res_mods):
+                    vlm3_model = cleaned_model.copy()
+                    vlm3_model.update({"model_tag": "chat", "model_type": "vlm3"})
+                    categorized_models['vlm3'].append(vlm3_model)
 
                 if _is_dashscope_image_understanding_model(m_id, desc, req_mods, res_mods):
-                    cleaned_model.update({"model_tag": "chat", "model_type": "vlm"})
-                    categorized_models['vlm'].append(cleaned_model)
-                    continue
+                    vlm_model = cleaned_model.copy()
+                    vlm_model.update({"model_tag": "chat", "model_type": "vlm"})
+                    categorized_models['vlm'].append(vlm_model)
 
-                # 6. Chat / LLM
+                # Fallback to llm when no specialized modality is present
                 if 'Text' in req_mod or 'Text' in res_mod:
-                    cleaned_model.update({"model_tag": "chat", "model_type": "llm"})
-                    categorized_models['chat'].append(cleaned_model)
+                    llm_model = cleaned_model.copy()
+                    llm_model.update({"model_tag": "chat", "model_type": "llm"})
+                    categorized_models['chat'].append(llm_model)
 
             # Return the specific list based on the requested target_model_type
             if target_model_type == "llm":
@@ -214,4 +230,3 @@ class DashScopeModelProvider(AbstractModelProvider):
                 return []
         except (httpx.HTTPStatusError, httpx.ConnectTimeout, httpx.ConnectError, Exception) as e:
             return _classify_provider_error("DashScope", exception=e)
-

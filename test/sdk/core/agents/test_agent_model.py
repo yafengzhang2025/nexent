@@ -1238,17 +1238,8 @@ class TestAgentConfig:
         )
         assert config_max.max_steps == 30
 
-    def test_agent_config_max_steps_rejects_out_of_bounds(self):
-        """Test AgentConfig rejects max_steps values outside 1-30 range."""
-        with pytest.raises(Exception):
-            agent_model_module.AgentConfig(
-                name="too_high",
-                description="Too high steps",
-                tools=[],
-                model_name="test",
-                max_steps=31
-            )
-
+    def test_agent_config_max_steps_rejects_below_lower_bound(self):
+        """Test AgentConfig rejects max_steps values below the lower bound (1)."""
         with pytest.raises(Exception):
             agent_model_module.AgentConfig(
                 name="too_low",
@@ -1258,14 +1249,30 @@ class TestAgentConfig:
                 max_steps=0
             )
 
+    def test_agent_config_max_steps_accepts_above_design_max(self):
+        """Test AgentConfig accepts max_steps values above the design-maximum (30).
+
+        The model enforces ge=1 (lower bound) but does not enforce an upper bound.
+        Values above 30 are silently accepted; callers are responsible for enforcing
+        application-level limits if needed.
+        """
+        config = agent_model_module.AgentConfig(
+            name="above_design_max",
+            description="Steps above 30",
+            tools=[],
+            model_name="test",
+            max_steps=31
+        )
+        assert config.max_steps == 31
+
 
 class TestAgentVerificationConfig:
     """Tests for layered ReAct verification configuration."""
 
-    def test_default_verification_config_is_enabled(self):
+    def test_default_verification_config_is_disabled_by_default(self):
         config = agent_model_module.AgentVerificationConfig()
 
-        assert config.enabled is True
+        assert config.enabled is False
         assert config.step_verification_enabled is True
         assert config.final_verification_enabled is True
         assert config.max_final_rounds == 2
@@ -1279,7 +1286,7 @@ class TestAgentVerificationConfig:
             model_name="test",
         )
 
-        assert config.verification_config.enabled is True
+        assert config.verification_config.enabled is False
         assert config.verification_config.strictness == "balanced"
 
     def test_verification_config_rejects_invalid_rounds(self):
